@@ -5,6 +5,21 @@
 
  :paths ["src"]
 
+ ;; The JDK crypto classes jolt.crypto installs (RFC 0014). A JVM library reaches
+ ;; for these with no install require — Selmer's {{ x|hash:"md5" }} filter calls
+ ;; MessageDigest/getInstance — so declaring them here is what lets that work for
+ ;; a project that depends on this library.
+ ;;
+ ;; SecureRandom is deliberately absent: the runtime implements it natively over
+ ;; the OS CSPRNG, so reaching for it should not make a program declare a library.
+ ;;
+ ;; Fully-qualified only; jolt derives the simple spelling.
+ :jolt/provides {jolt.crypto ["java.security.MessageDigest"
+                              "javax.crypto.Mac"
+                              "javax.crypto.Cipher"
+                              "javax.crypto.spec.SecretKeySpec"
+                              "javax.crypto.spec.IvParameterSpec"]}
+
  ;; OpenSSL (libcrypto for the symmetric primitives here; libssl so dependents
  ;; that also do TLS — e.g. jolt-lang/http-client — get both from one place and
  ;; don't redeclare them). Declared :jolt/native so jolt loads them before this
