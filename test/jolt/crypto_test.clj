@@ -291,10 +291,10 @@
                    (.update (byte-array (map int "sign")))
                    (.update (byte-array (map int " me"))))
                  (.verify s))))
-    (check "a non-positive RSA key size is rejected"
+    (check "an RSA key size below the minimum is rejected"
            (= "RSA key size must be between 512 and 16384 bits, got 256"
               (try (.initialize (KeyPairGenerator/getInstance "RSA") 256)
-                   nil (catch Exception e (.getMessage e)))))
+                   nil (catch Exception e (.getMessage e))))))
 
   ;; RSA digests beyond SHA-256 round-trip too
   (doseq [algo ["SHA1withRSA" "SHA384withRSA" "SHA512withRSA"]]
@@ -326,7 +326,33 @@
                  s  (-> (doto (Signature/getInstance "SHA256withRSA") (.initSign sk) (.update data))
                         .sign)]
              (-> (doto (Signature/getInstance "SHA256withRSA") (.initVerify pk) (.update data))
-                 (.verify s))))))
+                 (.verify s)))))
+  ;; A key of the other algorithm is refused rather than quietly signed with:
+  ;; EVP takes the primitive from the key, so nothing but this check keeps
+  ;; SHA256withRSA from handing back an ECDSA signature.
+  (let [eckp  (.genKeyPair (KeyPairGenerator/getInstance "EC"))
+        rsakp (.genKeyPair (KeyPairGenerator/getInstance "RSA"))
+        data  (byte-array (map int "sign me"))]
+    (check "SHA256withRSA refuses an EC key"
+           (= "key algorithm mismatch: expected RSA, got EC"
+              (try (-> (doto (Signature/getInstance "SHA256withRSA")
+                         (.initSign (.getPrivate eckp)) (.update data)) .sign)
+                   nil (catch Exception e (.getMessage e)))))
+    (check "SHA256withECDSA refuses an RSA key"
+           (= "key algorithm mismatch: expected EC, got RSA"
+              (try (-> (doto (Signature/getInstance "SHA256withECDSA")
+                         (.initSign (.getPrivate rsakp)) (.update data)) .sign)
+                   nil (catch Exception e (.getMessage e)))))
+    (check "an EC KeyFactory refuses an RSA key"
+           (= "key algorithm mismatch: expected EC, got RSA"
+              (try (.generatePublic (KeyFactory/getInstance "EC")
+                                    (X509EncodedKeySpec. (.getEncoded (.getPublic rsakp))))
+                   nil (catch Exception e (.getMessage e)))))
+    (check "an RSA KeyFactory refuses an EC key"
+           (= "key algorithm mismatch: expected RSA, got EC"
+              (try (.generatePrivate (KeyFactory/getInstance "RSA")
+                                     (PKCS8EncodedKeySpec. (.getEncoded (.getPrivate eckp))))
+                   nil (catch Exception e (.getMessage e))))))
 
   ;; unknown algorithms and curves throw, naming what was asked for
   (check "unknown Signature algorithm throws naming it"

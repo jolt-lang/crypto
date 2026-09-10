@@ -33,7 +33,11 @@ parse on either side.
 RSA is the same story: `SHA256withRSA` and friends produce the PKCS#1 v1.5
 signature the JDK does (a 256-byte ciphertext for a 2048-bit key), and
 `KeyFactory` reads the SPKI/PKCS#8 DER a JVM writes. `KeyPairGenerator` accepts
-the JDK's 512–16384 bit range and defaults to 2048 like a modern JDK.
+the JDK's 512–16384 bit range and defaults to 2048 like a modern JDK. OpenSSL
+takes the primitive from the key rather than from the algorithm name, so
+`Signature` and `KeyFactory` check the two agree and reject a key of the other
+algorithm the way the JDK does, rather than quietly signing with whichever key
+they were handed.
 
 ## Use
 

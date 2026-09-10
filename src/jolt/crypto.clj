@@ -85,6 +85,15 @@
 (ffi/defcfn c-bn-free      "BN_free"             [:pointer] :void)
 (ffi/defcfn c-pkey-set-rsa "EVP_PKEY_set1_RSA"   [:pointer :pointer] :int)
 
+;; What a parsed key actually is. EVP_PKEY_base_id is a real function in 1.1 but
+;; a macro for EVP_PKEY_get_base_id in 3, so neither spelling resolves on both;
+;; EVP_PKEY_get0_* are exported functions in either. A miss pushes
+;; EVP_R_EXPECTING_A_* onto the thread's error queue, which nothing here reads,
+;; so clear it rather than let it accumulate.
+(ffi/defcfn c-pkey-get0-ec  "EVP_PKEY_get0_EC_KEY" [:pointer] :pointer)
+(ffi/defcfn c-pkey-get0-rsa "EVP_PKEY_get0_RSA"    [:pointer] :pointer)
+(ffi/defcfn c-err-clear     "ERR_clear_error"      []         :void)
+
 ;; --- helpers ----------------------------------------------------------------
 (defn- tt [tag] (jolt.host/tagged-table tag))
 (defn- tget [t k] (jolt.host/ref-get t k))
@@ -226,6 +235,27 @@
         (try (f pkey) (finally (c-pkey-free pkey))))
       (finally (ffi/free buf) (ffi/free holder)))))
 
+(defn- pkey-algo
+  "The algorithm a parsed EVP_PKEY actually is: \"EC\", \"RSA\", or nil for
+  anything else — the EVP_Digest* path is algorithm-agnostic, so a key type
+  this namespace does not name is not by itself a reason to refuse."
+  [pkey]
+  (let [algo (cond
+               (not (ffi/null? (c-pkey-get0-ec pkey)))  "EC"
+               (not (ffi/null? (c-pkey-get0-rsa pkey))) "RSA")]
+    (c-err-clear)
+    algo))
+
+(defn- check-key-algo
+  "Refuse a key that is not the algorithm the caller asked for, as the JDK does
+  rather than quietly signing with whatever the key happens to be. Only a
+  positive disagreement is an error: either side being unknown lets it pass."
+  [want got]
+  (when (and want got (not= want got))
+    (throw (ex-info (str "key algorithm mismatch: expected " want ", got " got)
+                    {:expected want :actual got})))
+  got)
+
 (defn generate-ec-keypair
   "Generate an EC keypair on `curve`. Returns {:public <X.509 DER> :private <PKCS#8 DER>},
   the same two encodings the JVM's getEncoded hands back."
@@ -287,65 +317,73 @@
   "Sign `data` with a PKCS#8 DER private key, digesting with md-fn. The result
   is what Signature.sign returns on the JVM for that key: a DER-encoded ECDSA
   SEQUENCE of r and s for an EC key, the raw PKCS#1 v1.5 ciphertext for RSA.
-  EVP picks the primitive from the key itself, so the same call serves both."
-  [md-fn priv-der data]
-  (with-der-key c-d2i-privkey priv-der
-    (fn [pkey]
-      (let [data (as-ba data) dn (alength data)
-            ctx (c-md-ctx-new) dp (ffi/alloc (max 1 dn)) lenp (ffi/alloc 8)]
-        (try
-          (ffi/write-array dp data)
-          (when (not= 1 (c-dgst-sign-init ctx ffi/null (md-fn) ffi/null pkey))
-            (throw (ex-info "signature init failed" {})))
-          ;; a null signature buffer asks for the maximum size rather than signing
-          (ffi/write lenp :size_t 0 0)
-          (when (not= 1 (c-dgst-sign ctx ffi/null lenp dp dn))
-            (throw (ex-info "signature sizing failed" {})))
-          (let [sigp (ffi/alloc (ffi/read lenp :size_t))]
-            (try
-              (when (not= 1 (c-dgst-sign ctx sigp lenp dp dn))
-                (throw (ex-info "signing failed" {})))
-              (ffi/read-array sigp (ffi/read lenp :size_t))
-              (finally (ffi/free sigp))))
-          (finally (c-md-ctx-free ctx) (ffi/free dp) (ffi/free lenp)))))))
+  EVP picks the primitive from the key itself, so the same call serves both —
+  and so `want-algo`, when given, is what stops a key of the other algorithm
+  producing a signature the named algorithm did not ask for."
+  ([md-fn priv-der data] (pkey-sign md-fn priv-der data nil))
+  ([md-fn priv-der data want-algo]
+   (with-der-key c-d2i-privkey priv-der
+     (fn [pkey]
+       (check-key-algo want-algo (pkey-algo pkey))
+       (let [data (as-ba data) dn (alength data)
+             ctx (c-md-ctx-new) dp (ffi/alloc (max 1 dn)) lenp (ffi/alloc 8)]
+         (try
+           (ffi/write-array dp data)
+           (when (not= 1 (c-dgst-sign-init ctx ffi/null (md-fn) ffi/null pkey))
+             (throw (ex-info "signature init failed" {})))
+           ;; a null signature buffer asks for the maximum size rather than signing
+           (ffi/write lenp :size_t 0 0)
+           (when (not= 1 (c-dgst-sign ctx ffi/null lenp dp dn))
+             (throw (ex-info "signature sizing failed" {})))
+           (let [sigp (ffi/alloc (ffi/read lenp :size_t))]
+             (try
+               (when (not= 1 (c-dgst-sign ctx sigp lenp dp dn))
+                 (throw (ex-info "signing failed" {})))
+               (ffi/read-array sigp (ffi/read lenp :size_t))
+               (finally (ffi/free sigp))))
+           (finally (c-md-ctx-free ctx) (ffi/free dp) (ffi/free lenp))))))))
 
 (defn pkey-verify
   "Verify a signature over `data` against an X.509 DER public key, digesting
   with md-fn. The signature format is the key algorithm's (DER ECDSA r/s, raw
-  PKCS#1 v1.5 RSA)."
-  [md-fn pub-der data sig]
-  (with-der-key c-d2i-pubkey pub-der
-    (fn [pkey]
-      (let [data (as-ba data) sig (as-ba sig) dn (alength data) sn (alength sig)
-            ctx (c-md-ctx-new) dp (ffi/alloc (max 1 dn)) sp (ffi/alloc (max 1 sn))]
-        (try
-          (ffi/write-array dp data)
-          (ffi/write-array sp sig)
-          (when (not= 1 (c-dgst-verify-init ctx ffi/null (md-fn) ffi/null pkey))
-            (throw (ex-info "verification init failed" {})))
-          ;; a bad signature is a false, not a throw: EVP reports both the same way
-          (= 1 (c-dgst-verify ctx sp sn dp dn))
-          (finally (c-md-ctx-free ctx) (ffi/free dp) (ffi/free sp)))))))
+  PKCS#1 v1.5 RSA); `want-algo`, when given, holds the key to that algorithm."
+  ([md-fn pub-der data sig] (pkey-verify md-fn pub-der data sig nil))
+  ([md-fn pub-der data sig want-algo]
+   (with-der-key c-d2i-pubkey pub-der
+     (fn [pkey]
+       (check-key-algo want-algo (pkey-algo pkey))
+       (let [data (as-ba data) sig (as-ba sig) dn (alength data) sn (alength sig)
+             ctx (c-md-ctx-new) dp (ffi/alloc (max 1 dn)) sp (ffi/alloc (max 1 sn))]
+         (try
+           (ffi/write-array dp data)
+           (ffi/write-array sp sig)
+           (when (not= 1 (c-dgst-verify-init ctx ffi/null (md-fn) ffi/null pkey))
+             (throw (ex-info "verification init failed" {})))
+           ;; a bad signature is a false, not a throw: EVP reports both the same way
+           (= 1 (c-dgst-verify ctx sp sn dp dn))
+           (finally (c-md-ctx-free ctx) (ffi/free dp) (ffi/free sp))))))))
 
 ;; --- algorithm name -> primitive --------------------------------------------
 (defn- mac-md [algo]
   (case (str algo) ("HmacSHA512" "HMACSHA512") [c-sha512 64] ("HmacSHA384" "HMACSHA384") [c-sha384 48]
     ("HmacSHA256" "HMACSHA256") [c-sha256 32] ("HmacSHA1" "HMACSHA1") [c-sha1 20]
     (throw (ex-info (str "unsupported Mac algorithm: " algo) {:algo algo}))))
-;; SHA256withECDSA, SHA256withRSA and friends. The JVM spells these without
-;; separators and case-insensitively in practice, so match on the upcased form.
-(defn- signature-md [algo]
+;; SHA256withECDSA, SHA256withRSA and friends -> [digest, key algorithm]. The
+;; JVM spells these without separators and case-insensitively in practice, so
+;; match on the upcased form. EVP takes the primitive from the key rather than
+;; the name, so the second half is what holds a key to the algorithm it names.
+(defn- signature-spec [algo]
   (case (str/upper-case (str algo))
-    "SHA512WITHECDSA" c-sha512
-    "SHA384WITHECDSA" c-sha384
-    "SHA256WITHECDSA" c-sha256
-    "SHA224WITHECDSA" c-sha224
-    "SHA1WITHECDSA"   c-sha1
-    "SHA512WITHRSA"   c-sha512
-    "SHA384WITHRSA"   c-sha384
-    "SHA256WITHRSA"   c-sha256
-    "SHA224WITHRSA"   c-sha224
-    "SHA1WITHRSA"     c-sha1
+    "SHA512WITHECDSA" [c-sha512 "EC"]
+    "SHA384WITHECDSA" [c-sha384 "EC"]
+    "SHA256WITHECDSA" [c-sha256 "EC"]
+    "SHA224WITHECDSA" [c-sha224 "EC"]
+    "SHA1WITHECDSA"   [c-sha1   "EC"]
+    "SHA512WITHRSA"   [c-sha512 "RSA"]
+    "SHA384WITHRSA"   [c-sha384 "RSA"]
+    "SHA256WITHRSA"   [c-sha256 "RSA"]
+    "SHA224WITHRSA"   [c-sha224 "RSA"]
+    "SHA1WITHRSA"     [c-sha1   "RSA"]
     (throw (ex-info (str "unsupported Signature algorithm: " algo) {:algo algo}))))
 
 (defn- digest-spec [algo]
@@ -549,8 +587,9 @@
   ;; java.security.KeyFactory — DER key spec in, key object out. Decoding once
   ;; here means malformed bytes are rejected at generate* time, as on the JVM,
   ;; rather than surfacing later as a mysterious verification failure. d2i
-  ;; accepts either algorithm's DER, so the factory only needs to remember
-  ;; which algorithm it was asked for, to stamp on the keys it hands out.
+  ;; accepts either algorithm's DER, so the parsed key's own NID — not the
+  ;; algorithm the factory was asked for — is what the key gets stamped with,
+  ;; and a disagreement between the two is an error, as it is on the JVM.
   (doseq [nm ["KeyFactory" "java.security.KeyFactory"]]
     (__register-class-statics! nm
       {"getInstance" (fn [algo & _]
@@ -560,25 +599,30 @@
                          (throw (ex-info (str "unsupported KeyFactory algorithm: " algo) {:algo algo}))))}))
   (__register-class-methods! :jolt.crypto/key-factory
     {"generatePublic" (fn [self spec]
-                        (let [der (->ba spec)]
-                          (with-der-key c-d2i-pubkey der (fn [_] nil))
+                        (let [der (->ba spec)
+                              algo (with-der-key c-d2i-pubkey der pkey-algo)]
+                          (check-key-algo (tget self :algo) algo)
                           (doto (tt :jolt.crypto/public-key)
-                            (tput! :bytes der) (tput! :algo (tget self :algo)))))
+                            (tput! :bytes der) (tput! :algo (or algo (tget self :algo))))))
      "generatePrivate" (fn [self spec]
-                         (let [der (->ba spec)]
-                           (with-der-key c-d2i-privkey der (fn [_] nil))
+                         (let [der (->ba spec)
+                               algo (with-der-key c-d2i-privkey der pkey-algo)]
+                           (check-key-algo (tget self :algo) algo)
                            (doto (tt :jolt.crypto/private-key)
-                             (tput! :bytes der) (tput! :algo (tget self :algo)))))
+                             (tput! :bytes der) (tput! :algo (or algo (tget self :algo))))))
      "getAlgorithm" (fn [self] (tget self :algo))})
 
   ;; java.security.Signature — stateful like Cipher: init picks key and
   ;; direction, update accumulates, sign/verify consume and reset.
   (doseq [nm ["Signature" "java.security.Signature"]]
     (__register-class-statics! nm
-      {"getInstance" (fn [algo & _] (doto (tt :jolt.crypto/signature)
-                                      (tput! :md (signature-md algo))
-                                      (tput! :algo (str algo))
-                                      (tput! :acc [])))}))
+      {"getInstance" (fn [algo & _]
+                       (let [[md key-algo] (signature-spec algo)]
+                         (doto (tt :jolt.crypto/signature)
+                           (tput! :md md)
+                           (tput! :key-algo key-algo)
+                           (tput! :algo (str algo))
+                           (tput! :acc []))))}))
   (__register-class-methods! :jolt.crypto/signature
     {"initSign" (fn [self key & _] (tput! self :key (->ba key)) (tput! self :acc []) nil)
      "initVerify" (fn [self key & _] (tput! self :key (->ba key)) (tput! self :acc []) nil)
@@ -588,11 +632,11 @@
      "sign" (fn [self & _]
               (let [body (concat-bas (tget self :acc))]
                 (tput! self :acc [])
-                (pkey-sign (tget self :md) (tget self :key) body)))
+                (pkey-sign (tget self :md) (tget self :key) body (tget self :key-algo))))
      "verify" (fn [self sig & _]
                 (let [body (concat-bas (tget self :acc))]
                   (tput! self :acc [])
-                  (pkey-verify (tget self :md) (tget self :key) body sig)))
+                  (pkey-verify (tget self :md) (tget self :key) body sig (tget self :key-algo))))
      "getAlgorithm" (fn [self] (tget self :algo))})
   nil)
 
