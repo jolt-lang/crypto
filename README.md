@@ -11,9 +11,9 @@ OpenSSL (`libcrypto`) through `jolt.ffi`, and exposed as the slice of the
 | `java.security.MessageDigest` | `SHA-512`, `SHA-384`, `SHA-256`, `SHA-224`, `SHA-1`, `MD5` |
 | `java.security.SecureRandom` | `RAND_bytes`-backed `nextBytes` / `generateSeed` / `nextInt` / `nextLong` / `nextDouble` / `nextFloat` / `nextBoolean` |
 | `javax.crypto.spec.SecretKeySpec` / `IvParameterSpec` | key + IV holders |
-| `java.security.KeyPairGenerator` | EC keygen over P-256 / P-384 / P-521 / secp256k1 |
-| `java.security.Signature` | `SHA1`/`SHA224`/`SHA256`/`SHA384`/`SHA512withECDSA` |
-| `java.security.KeyFactory` | EC keys from encoded DER |
+| `java.security.KeyPairGenerator` | EC keygen over P-256 / P-384 / P-521 / secp256k1, and RSA keygen (512–16384 bits, default 2048, exponent 65537) |
+| `java.security.Signature` | `SHA1`/`SHA224`/`SHA256`/`SHA384`/`SHA512withECDSA` and `…withRSA` |
+| `java.security.KeyFactory` | EC and RSA keys from encoded DER |
 | `java.security.spec.ECGenParameterSpec` / `X509EncodedKeySpec` / `PKCS8EncodedKeySpec` | curve name + DER key holders |
 
 This is enough for `ring-core`'s encrypted session-cookie store and the CSRF
@@ -29,6 +29,15 @@ JVM and a Jolt process unchanged. Two small supersets: the curve aliases
 such curve. OpenSSL's PKCS#8 embeds the optional public key where the JDK's does
 not, so a private key encodes to 138 bytes rather than the JDK's 67; both forms
 parse on either side.
+
+RSA is the same story: `SHA256withRSA` and friends produce the PKCS#1 v1.5
+signature the JDK does (a 256-byte ciphertext for a 2048-bit key), and
+`KeyFactory` reads the SPKI/PKCS#8 DER a JVM writes. `KeyPairGenerator` accepts
+the JDK's 512–16384 bit range and defaults to 2048 like a modern JDK. OpenSSL
+takes the primitive from the key rather than from the algorithm name, so
+`Signature` and `KeyFactory` check the two agree and reject a key of the other
+algorithm the way the JDK does, rather than quietly signing with whichever key
+they were handed.
 
 ## Use
 
