@@ -15,9 +15,19 @@ OpenSSL (`libcrypto`) through `jolt.ffi`, and exposed as the slice of the
 | `java.security.Signature` | `SHA1`/`SHA224`/`SHA256`/`SHA384`/`SHA512withECDSA` and `…withRSA` |
 | `java.security.KeyFactory` | EC and RSA keys from encoded DER |
 | `java.security.spec.ECGenParameterSpec` / `X509EncodedKeySpec` / `PKCS8EncodedKeySpec` | curve name + DER key holders |
+| `java.security.cert.CertificateFactory` | `X.509` certificates from PEM (one or a bundle) or DER, via `generateCertificate` / `generateCertificates` |
+| `java.security.cert.X509Certificate` | subject / issuer (`X500Principal` and `getSubjectDN`), `getNotBefore` / `getNotAfter` / `checkValidity`, serial, version, `getSigAlgName` / `getSigAlgOID`, `getPublicKey`, `getEncoded` |
 
 This is enough for `ring-core`'s encrypted session-cookie store and the CSRF
-token machinery, so **ring-defaults** loads and runs on Jolt.
+token machinery, so **ring-defaults** loads and runs on Jolt, and for
+`nrepl/nrepl`'s TLS namespace to load, so nREPL middleware libraries do.
+
+A certificate is parsed once and kept as data: what `X509Certificate` answers
+is what the JDK's does for the same bytes — RFC 2253 names from
+`getSubjectX500Principal`, the RFC 1779 spelling from `getSubjectDN`, the JDK's
+signature-algorithm names (`SHA256withECDSA`), and the same DER from
+`getEncoded`. What is not here: chain validation, `KeyStore`, `SSLContext`
+and the rest of TLS.
 
 The EC keys and signatures are wire-compatible with the JVM in both directions.
 `getEncoded` gives the same X.509 SubjectPublicKeyInfo and PKCS#8 PrivateKeyInfo

@@ -1,12 +1,14 @@
 (ns jolt.crypto-test
   "Drives the shims through the javax.crypto / java.security surface, exactly the
   way ring-core's session-cookie store does."
-  (:require [jolt.crypto]))
+  (:require [jolt.crypto]
+            [clojure.string :as str]))
 
 (import '[javax.crypto Cipher Mac])
 (import '[javax.crypto.spec SecretKeySpec IvParameterSpec])
 (import '[java.security SecureRandom MessageDigest KeyPairGenerator Signature KeyFactory])
 (import '[java.security.spec ECGenParameterSpec X509EncodedKeySpec PKCS8EncodedKeySpec])
+(import '[java.security.cert CertificateFactory X509Certificate Certificate CertificateException])
 
 (def ^:private failures (atom 0))
 (defn- check [label ok?] (println (if ok? "ok  " "FAIL") label) (when-not ok? (swap! failures inc)))
@@ -56,9 +58,86 @@
     (check "MessageDigest.update snapshots caller bytes"
            (ba= expected (.digest md)))))
 
+;; A self-signed EC certificate: CN=jolt.test, O=Jolt, C=US, serial 0x12345678,
+;; valid 2026-01-01 to 2036-01-01, ecdsa-with-SHA256. Every expected value
+;; below is what OpenJDK 21's X509CertImpl answers for this same PEM.
+(def ^:private test-cert-pem
+  "-----BEGIN CERTIFICATE-----\nMIIBpTCCAUugAwIBAgIEEjRWeDAKBggqhkjOPQQDAjAwMRIwEAYDVQQDDAlqb2x0\nLnRlc3QxDTALBgNVBAoMBEpvbHQxCzAJBgNVBAYTAlVTMB4XDTI2MDEwMTAwMDAw\nMFoXDTM2MDEwMTAwMDAwMFowMDESMBAGA1UEAwwJam9sdC50ZXN0MQ0wCwYDVQQK\nDARKb2x0MQswCQYDVQQGEwJVUzBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABA2S\nRF8eJAyz8DfbzvJBorsdNCFbnP0TdB1eHXqFEWjZRY/Xc6vYdCx2CD6VDwMcCzk/\n5L8Gbiu48yMAv5IYu8WjUzBRMB0GA1UdDgQWBBQixWjb0UMb3v62Oyjvj/dJaC0s\nPzAfBgNVHSMEGDAWgBQixWjb0UMb3v62Oyjvj/dJaC0sPzAPBgNVHRMBAf8EBTAD\nAQH/MAoGCCqGSM49BAMCA0gAMEUCIEp4nblFz7LDjX+XqrPfhmygZW4dj9GPFaG8\nM5m01PH7AiEA/eiV4/JxqoCXlAbCvCqmBT2LiJBp9RJXOFeVu32HpkE=\n-----END CERTIFICATE-----\n")
+
+(defn- test-x509-certificates []
+  (let [cf (CertificateFactory/getInstance "X.509")
+        cert (.generateCertificate cf (java.io.ByteArrayInputStream. (.getBytes test-cert-pem)))]
+    (check "CertificateFactory type" (= "X.509" (.getType cf)))
+    (check "X509 is recognised" (= "X509" (.getType (CertificateFactory/getInstance "X509"))))
+    (check "an unknown type is a CertificateException"
+           (= ["java.security.cert.CertificateException" "Bogus not found"]
+              (try (CertificateFactory/getInstance "Bogus") :no-throw
+                   (catch CertificateException e [(.getName (class e)) (.getMessage e)]))))
+    (check "certificate type" (= "X.509" (.getType cert)))
+    (check "class" (= "java.security.cert.X509Certificate" (.getName (class cert))))
+    (check "instance? X509Certificate" (instance? X509Certificate cert))
+    (check "instance? Certificate" (instance? Certificate cert))
+    (check "subject (RFC 2253)" (= "C=US,O=Jolt,CN=jolt.test" (.getName (.getSubjectX500Principal cert))))
+    (check "issuer (RFC 2253)" (= "C=US,O=Jolt,CN=jolt.test" (.getName (.getIssuerX500Principal cert))))
+    (check "subject DN (RFC 1779)" (= "C=US, O=Jolt, CN=jolt.test" (.getName (.getSubjectDN cert))))
+    (check "subject DN toString" (= "C=US, O=Jolt, CN=jolt.test" (str (.getSubjectDN cert))))
+    (check "X500Principal getName RFC1779" (= "C=US, O=Jolt, CN=jolt.test" (.getName (.getSubjectX500Principal cert) "RFC1779")))
+    (check "X500Principal equality" (= (.getSubjectX500Principal cert) (.getIssuerX500Principal cert)))
+    (check "X500Principal from a string" (= (javax.security.auth.x500.X500Principal. "C=US,O=Jolt,CN=jolt.test") (.getSubjectX500Principal cert)))
+    (check "serial number" (= 305419896 (.getSerialNumber cert)))
+    (check "notBefore" (= 1767225600000 (.getTime (.getNotBefore cert))))
+    (check "notAfter" (= 2082758400000 (.getTime (.getNotAfter cert))))
+    (check "version" (= 3 (.getVersion cert)))
+    (check "signature algorithm name" (= "SHA256withECDSA" (.getSigAlgName cert)))
+    (check "signature algorithm OID" (= "1.2.840.10045.4.3.2" (.getSigAlgOID cert)))
+    (check "public key algorithm" (= "EC" (.getAlgorithm (.getPublicKey cert))))
+    (check "public key format" (= "X.509" (.getFormat (.getPublicKey cert))))
+    (check "public key DER length" (= 91 (alength (.getEncoded (.getPublicKey cert)))))
+    (check "encoded DER length" (= 425 (alength (.getEncoded cert))))
+    (check "DER round-trips through the factory"
+           (ba= (.getEncoded cert)
+                (.getEncoded (.generateCertificate cf (java.io.ByteArrayInputStream. (.getEncoded cert))))))
+    (check "the public key is what KeyFactory builds, so a Signature accepts it"
+           (let [sig (Signature/getInstance "SHA256withECDSA")]
+             (.initVerify sig (.getPublicKey cert))
+             (.update sig (.getBytes "data"))
+             (false? (.verify sig (byte-array [48 6 2 1 1 2 1 1])))))
+    (check "the public key round-trips through KeyFactory"
+           (let [kf (KeyFactory/getInstance "EC")
+                 pub (.generatePublic kf (X509EncodedKeySpec. (.getEncoded (.getPublicKey cert))))]
+             (ba= (.getEncoded pub) (.getEncoded (.getPublicKey cert)))))
+    ;; the key carries its algorithm, so the mismatch is caught (at verify,
+    ;; where this library checks it)
+    (check "an RSA Signature refuses the certificate's EC key"
+           (= :threw (try (let [sig (Signature/getInstance "SHA256withRSA")]
+                            (.initVerify sig (.getPublicKey cert))
+                            (.update sig (.getBytes "data"))
+                            (.verify sig (byte-array [48 6 2 1 1 2 1 1])))
+                          :no-throw
+                          (catch Exception _ :threw))))
+    (check "checkValidity now" (nil? (.checkValidity cert)))
+    (check "checkValidity before notBefore"
+           (= "java.security.cert.CertificateNotYetValidException"
+              (try (.checkValidity cert (java.util.Date. 0)) :no-throw
+                   (catch CertificateException e (.getName (class e))))))
+    (check "checkValidity after notAfter"
+           (= "java.security.cert.CertificateExpiredException"
+              (try (.checkValidity cert (java.util.Date. 4102444800000)) :no-throw
+                   (catch Exception e (.getName (class e))))))
+    (check "a PEM bundle yields every certificate"
+           (= 2 (count (.generateCertificates cf (java.io.ByteArrayInputStream. (.getBytes (str test-cert-pem test-cert-pem)))))))
+    (check "equal by encoding" (= cert (.generateCertificate cf (java.io.ByteArrayInputStream. (.getBytes test-cert-pem)))))
+    (check "hash by encoding" (= (hash cert) (hash (.generateCertificate cf (java.io.ByteArrayInputStream. (.getBytes test-cert-pem))))))
+    (check "unparseable input is a CertificateException"
+           (= ["java.security.cert.CertificateException" "Could not parse certificate: java.io.IOException: Empty input"]
+              (try (.generateCertificate cf (java.io.ByteArrayInputStream. (.getBytes "not a cert"))) :no-throw
+                   (catch Exception e [(.getName (class e)) (.getMessage e)]))))
+    (check "toString names the subject" (str/includes? (str cert) "Subject: C=US, O=Jolt, CN=jolt.test"))))
+
 (defn -main [& _]
   (test-large-input-digest)
   (test-update-snapshots-input)
+  (test-x509-certificates)
 
   ;; SecureRandom fills a buffer with (probably) non-zero, varying bytes.
   (let [sr (SecureRandom.) a (byte-array 16) b (byte-array 16)]
