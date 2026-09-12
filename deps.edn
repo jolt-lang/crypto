@@ -19,6 +19,12 @@
                               "javax.crypto.Cipher"
                               "javax.crypto.spec.SecretKeySpec"
                               "javax.crypto.spec.IvParameterSpec"
+                              "java.security.Signature"
+                              "java.security.KeyPairGenerator"
+                              "java.security.KeyFactory"
+                              "java.security.spec.ECGenParameterSpec"
+                              "java.security.spec.X509EncodedKeySpec"
+                              "java.security.spec.PKCS8EncodedKeySpec"
                               "java.security.cert.CertificateFactory"
                               "java.security.cert.X509Certificate"
                               "javax.security.auth.x500.X500Principal"]}
