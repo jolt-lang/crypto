@@ -18,7 +18,10 @@
                               "javax.crypto.Mac"
                               "javax.crypto.Cipher"
                               "javax.crypto.spec.SecretKeySpec"
-                              "javax.crypto.spec.IvParameterSpec"]}
+                              "javax.crypto.spec.IvParameterSpec"
+                              "java.security.cert.CertificateFactory"
+                              "java.security.cert.X509Certificate"
+                              "javax.security.auth.x500.X500Principal"]}
 
  ;; OpenSSL (libcrypto for the symmetric primitives here; libssl so dependents
  ;; that also do TLS — e.g. jolt-lang/http-client — get both from one place and
