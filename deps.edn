@@ -34,14 +34,28 @@
  ;; don't redeclare them). Declared :jolt/native so jolt loads them before this
  ;; namespace, where the foreign-fn bindings resolve at load. An app pulling both
  ;; this and http-client loads each library once — jolt.deps reconciles natives.
+ ;;
+ ;; A platform with no key here is searched for NOTHING — jolt.main/load-natives!
+ ;; reads exactly the key the running platform selects — so declaring only
+ ;; :darwin/:linux made every dependent app fail on Windows with "required native
+ ;; library crypto not found — tried []", however completely the DLLs were on
+ ;; PATH (jolt-lang/jolt#990). The Windows names are the version-suffixed ones
+ ;; OpenSSL's own builds ship, which is what Git for Windows installs and what
+ ;; jolt's own Maven fetcher already looks for (stdlib/jolt/mvn_http.clj). They
+ ;; are bare, so the standard loader search order applies: the executable's
+ ;; directory (the DLLs beside jolt.exe) and PATH both work.
  :jolt/native [{:name "crypto"
-                :darwin ["/opt/homebrew/opt/openssl@3/lib/libcrypto.dylib"
-                         "/usr/lib/libcrypto.dylib" "libcrypto.dylib"]
-                :linux  ["libcrypto.so.3" "libcrypto.so.1.1" "libcrypto.so"]}
+                :darwin  ["/opt/homebrew/opt/openssl@3/lib/libcrypto.dylib"
+                          "/usr/lib/libcrypto.dylib" "libcrypto.dylib"]
+                :linux   ["libcrypto.so.3" "libcrypto.so.1.1" "libcrypto.so"]
+                :windows ["libcrypto-3-x64.dll" "libcrypto-3.dll"
+                          "libcrypto-1_1-x64.dll" "libcrypto.dll"]}
                {:name "ssl"
-                :darwin ["/opt/homebrew/opt/openssl@3/lib/libssl.dylib"
-                         "/usr/lib/libssl.dylib" "libssl.dylib"]
-                :linux  ["libssl.so.3" "libssl.so.1.1" "libssl.so"]}]
+                :darwin  ["/opt/homebrew/opt/openssl@3/lib/libssl.dylib"
+                          "/usr/lib/libssl.dylib" "libssl.dylib"]
+                :linux   ["libssl.so.3" "libssl.so.1.1" "libssl.so"]
+                :windows ["libssl-3-x64.dll" "libssl-3.dll"
+                          "libssl-1_1-x64.dll" "libssl.dll"]}]
 
  :aliases {:test {:extra-paths ["test"]
                   :main-opts ["-m" "jolt.crypto-test"]}}
