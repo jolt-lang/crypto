@@ -2,6 +2,7 @@
   "Drives the shims through the javax.crypto / java.security surface, exactly the
   way ring-core's session-cookie store does."
   (:require [jolt.crypto]
+            [clojure.edn :as edn]
             [clojure.string :as str]))
 
 (import '[javax.crypto Cipher Mac])
@@ -134,7 +135,25 @@
                    (catch Exception e [(.getName (class e)) (.getMessage e)]))))
     (check "toString names the subject" (str/includes? (str cert) "Subject: C=US, O=Jolt, CN=jolt.test"))))
 
+(defn- test-native-declarations []
+  ;; jolt.main/load-natives! reads exactly the platform key current-platform
+  ;; selects, so a spec missing :windows has no candidates there at all and the
+  ;; library fails to load before any app code runs (#11). The loader's
+  ;; conventional-spelling fallback is a safety net, not a declaration.
+  (let [natives (:jolt/native (edn/read-string (slurp "deps.edn")))]
+    (check "deps.edn declares libcrypto and libssl"
+           (= #{"crypto" "ssl"} (set (map :name natives))))
+    (doseq [{:keys [name] :as spec} natives
+            plat [:darwin :linux :windows]]
+      (check (str name " declares " plat " candidates")
+             (seq (get spec plat))))
+    (doseq [{:keys [name windows]} natives
+            dll windows]
+      (check (str name " windows candidate " dll " is a DLL")
+             (str/ends-with? dll ".dll")))))
+
 (defn -main [& _]
+  (test-native-declarations)
   (test-large-input-digest)
   (test-update-snapshots-input)
   (test-x509-certificates)
