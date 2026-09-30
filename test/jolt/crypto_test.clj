@@ -59,6 +59,76 @@
     (check "MessageDigest.update snapshots caller bytes"
            (ba= expected (.digest md)))))
 
+(defn- test-offset-length-overloads []
+  ;; issue #12: the JVM's (bytes, off, len) overloads consume a window of the
+  ;; buffer — the shape every streaming loop uses: fill a buffer, then
+  ;; update(buf, 0, n) with however many bytes the read returned. off/len used
+  ;; to be discarded, so the stale tail of a short read went into the digest,
+  ;; mac, signature, or ciphertext.
+  (let [buf (byte-array (concat (map int "abc") (repeat 61 65)))
+        abc-hex "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"]
+    (check "MessageDigest.update(buf, 0, 3) hashes the window"
+           (= abc-hex (hex (.digest (doto (MessageDigest/getInstance "SHA-256") (.update buf 0 3))))))
+    (check "MessageDigest.update(buf, off, len) honors a nonzero offset"
+           (let [buf2 (byte-array (concat (repeat 5 66) (map int "abc") (repeat 56 65)))]
+             (= abc-hex (hex (.digest (doto (MessageDigest/getInstance "SHA-256") (.update buf2 5 3)))))))
+    (check "window and whole-array updates accumulate together"
+           (= abc-hex (hex (.digest (doto (MessageDigest/getInstance "SHA-256")
+                                       (.update (byte-array (map int "ab")))
+                                       (.update buf 2 1))))))
+    ;; digest(buf, off, len) is an OUTPUT overload on the JVM: it digests the
+    ;; accumulated state, writes it into buf at off, returns the length.
+    (check "MessageDigest.digest(buf, off, len) writes the digest into buf"
+           (let [out (byte-array 32)
+                 n (.digest (doto (MessageDigest/getInstance "SHA-256")
+                              (.update (byte-array (map int "abc"))))
+                            out 0 32)]
+             (and (= 32 n) (= abc-hex (hex out)))))
+    (check "digest(buf, off, len) throws when len is below the digest length"
+           (= :threw (try (.digest (doto (MessageDigest/getInstance "SHA-256")
+                                     (.update (byte-array (map int "abc"))))
+                                   (byte-array 32) 0 3)
+                          :no-throw (catch Exception _ :threw))))
+    (check "update(buf, off, len) snapshots the window"
+           (let [b (aclone buf) md (MessageDigest/getInstance "SHA-256")]
+             (.update md b 0 3)
+             (dotimes [i 64] (aset b i (byte 88)))
+             (= abc-hex (hex (.digest md)))))
+    (check "Mac.update(buf, off, len) macs the window"
+           (ba= (let [m (Mac/getInstance "HmacSHA256")]
+                  (.init m (SecretKeySpec. k "HmacSHA256"))
+                  (.update m buf 0 3)
+                  (.doFinal m))
+                (let [m (Mac/getInstance "HmacSHA256")]
+                  (.init m (SecretKeySpec. k "HmacSHA256")) (.doFinal m (byte-array (map int "abc"))))))
+    (check "Mac.doFinal(output, off) writes into the caller's buffer"
+           (let [out (byte-array 32)
+                 expected (let [m (Mac/getInstance "HmacSHA256")]
+                            (.init m (SecretKeySpec. k "HmacSHA256"))
+                            (.doFinal m (byte-array (map int "abc"))))]
+             (.doFinal (doto (Mac/getInstance "HmacSHA256")
+                         (.init (SecretKeySpec. k "HmacSHA256"))
+                         (.update buf 0 3))
+                       out 0)
+             (ba= expected out)))
+    (check "Signature.update(buf, off, len) signs the window"
+           (let [data (byte-array (map int "sign me"))
+                 win (byte-array (concat (map int "sign me") (repeat 57 65)))
+                 kp (.genKeyPair (KeyPairGenerator/getInstance "EC"))
+                 s (-> (doto (Signature/getInstance "SHA256withECDSA")
+                         (.initSign (.getPrivate kp)) (.update win 0 7))
+                       .sign)]
+             (-> (doto (Signature/getInstance "SHA256withECDSA")
+                   (.initVerify (.getPublic kp)) (.update data))
+                 (.verify s))))
+    (check "Cipher.doFinal(buf, off, len) encrypts the window"
+           (let [key (byte-array (range 16))
+                 msg (byte-array (map int "the window"))
+                 win (byte-array (concat (map int "the window") (repeat 54 65)))
+                 enc (Cipher/getInstance "AES/CBC/PKCS5Padding")]
+             (.init enc Cipher/ENCRYPT_MODE (SecretKeySpec. key "AES"))
+             (ba= msg (decrypt key (.getIV enc) (.doFinal enc win 0 (alength msg))))))))
+
 ;; A self-signed EC certificate: CN=jolt.test, O=Jolt, C=US, serial 0x12345678,
 ;; valid 2026-01-01 to 2036-01-01, ecdsa-with-SHA256. Every expected value
 ;; below is what OpenJDK 21's X509CertImpl answers for this same PEM.
@@ -156,6 +226,7 @@
   (test-native-declarations)
   (test-large-input-digest)
   (test-update-snapshots-input)
+  (test-offset-length-overloads)
   (test-x509-certificates)
 
   ;; SecureRandom fills a buffer with (probably) non-zero, varying bytes.
