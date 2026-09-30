@@ -161,6 +161,22 @@
   ;; called, not retain an array the caller can mutate before digest/sign.
   (aclone (as-ba x)))
 
+(defn- ba-window
+  "A copy of the [off, off+len) window of a byte array — the JVM's
+  update/digest/doFinal (bytes, off, len) overloads consume exactly this."
+  [x off len]
+  (let [src (as-ba x) out (byte-array len)]
+    (System/arraycopy src off out 0 len)
+    out))
+
+(defn- consume-update-args
+  "Snapshot one update() payload: (data) is the whole array, (data off len) the
+  window. Either way the caller's bytes are consumed now, not retained."
+  [data more]
+  (if (= 2 (count more))
+    (ba-window data (first more) (second more))
+    (snapshot-ba data)))
+
 (defn- concat-bas [bas]
   "Join byte arrays with bulk copies."
   (let [total (reduce + 0 (map alength bas))
@@ -673,9 +689,20 @@
 (defn install! []
   ;; javax.crypto.spec.SecretKeySpec / IvParameterSpec — key + IV holders.
   (doseq [nm ["SecretKeySpec" "javax.crypto.spec.SecretKeySpec"]]
-    (__register-class-ctor! nm (fn [key & _] (doto (tt :jolt.crypto/key) (tput! :bytes (byte-array key))))))
+    ;; (key algo) or (key off len algo) — the four-arg form keys on a window.
+    (__register-class-ctor! nm (fn [key & more]
+                                 (let [[bs algo] (if (= 3 (count more))
+                                                   [(ba-window key (first more) (second more)) (nth more 2)]
+                                                   [(byte-array key) (first more)])]
+                                   (doto (tt :jolt.crypto/key)
+                                     (tput! :bytes bs)
+                                     (tput! :algo (some-> algo str)))))))
   (doseq [nm ["IvParameterSpec" "javax.crypto.spec.IvParameterSpec"]]
-    (__register-class-ctor! nm (fn [iv & _] (doto (tt :jolt.crypto/iv) (tput! :bytes (byte-array iv))))))
+    (__register-class-ctor! nm (fn [iv & more]
+                                 (doto (tt :jolt.crypto/iv)
+                                   (tput! :bytes (if (= 2 (count more))
+                                                   (ba-window iv (first more) (second more))
+                                                   (byte-array iv)))))))
   (__register-class-methods! :jolt.crypto/key {"getEncoded" (fn [self] (tget self :bytes))
                                                "getAlgorithm" (fn [self] (or (tget self :algo) "AES"))})
 
@@ -691,17 +718,40 @@
               (tput! self :key (->ba key))
               (tput! self :iv (if (seq more) (->ba (first more)) (random-bytes 16)))
               nil)
-     "doFinal" (fn [self data & _]
-                 (aes-cbc (= ENCRYPT-MODE (tget self :mode)) (tget self :key) (tget self :iv) data))
+     "doFinal" (fn [self data & more]
+                 (let [d (if (= 2 (count more))
+                           (ba-window data (first more) (second more))
+                           data)]
+                   (aes-cbc (= ENCRYPT-MODE (tget self :mode)) (tget self :key) (tget self :iv) d)))
      "getIV" (fn [self] (tget self :iv))
      "getBlockSize" (fn [self] 16)})
 
   ;; javax.crypto.Mac
   (doseq [nm ["Mac" "javax.crypto.Mac"]]
-    (__register-class-statics! nm {"getInstance" (fn [algo & _] (doto (tt :jolt.crypto/mac) (tput! :md (mac-md algo))))}))
+    (__register-class-statics! nm {"getInstance" (fn [algo & _]
+                                                   (doto (tt :jolt.crypto/mac)
+                                                     (tput! :md (mac-md algo))
+                                                     (tput! :acc [])))}))
   (__register-class-methods! :jolt.crypto/mac
-    {"init" (fn [self key & _] (tput! self :key (->ba key)) nil)
-     "doFinal" (fn [self data & _] (let [[mdf len] (tget self :md)] (hmac mdf len (tget self :key) data)))
+    {"init" (fn [self key & _] (tput! self :key (->ba key)) (tput! self :acc []) nil)
+     "update" (fn [self data & more]
+                (tput! self :acc (conj (or (tget self :acc) []) (consume-update-args data more)))
+                nil)
+     "doFinal" (fn [self & args]
+                 (let [[mdf len] (tget self :md)
+                       acc (or (tget self :acc) [])
+                       ;; doFinal(output, off) writes the mac into the caller's
+                       ;; buffer instead of returning a fresh one.
+                       output (when (= 2 (count args)) [(first args) (second args)])
+                       body (concat-bas (if (and (seq args) (nil? output))
+                                          (conj acc (as-ba (first args)))
+                                          acc))
+                       mac (hmac mdf len (tget self :key) body)]
+                   (tput! self :acc [])
+                   (if output
+                     (do (dotimes [i len] (aset ^bytes (output 0) (+ (output 1) i) (aget mac i)))
+                         len)
+                     mac)))
      "getMacLength" (fn [self] (let [[_ len] (tget self :md)] len))})
 
   ;; java.security.MessageDigest
@@ -710,10 +760,23 @@
                                                    (let [[mdf len] (digest-spec algo)]
                                                      (doto (tt :jolt.crypto/md) (tput! :md mdf) (tput! :len len) (tput! :acc []))))}))
   (__register-class-methods! :jolt.crypto/md
-    {"update" (fn [self data & _]
-                (tput! self :acc (conj (tget self :acc) (snapshot-ba data)))
+    {"update" (fn [self data & more]
+                (tput! self :acc (conj (tget self :acc) (consume-update-args data more)))
                 nil)
      "digest" (fn [self & args]
+                ;; digest(buf, off, len) is an output overload: it digests the
+                ;; accumulated state, writes it into buf at off, and returns the
+                ;; digest length (throwing when len is below it).
+                (if (= 3 (count args))
+                  (let [[buf off len] args
+                        dlen (tget self :len)]
+                    (when (< len dlen)
+                      (throw (ex-info "insufficient space in the output buffer for the digest"
+                                      {:len len :digest-length dlen})))
+                    (let [d (digest (tget self :md) dlen (concat-bas (tget self :acc)))]
+                      (tput! self :acc [])
+                      (dotimes [i dlen] (aset ^bytes buf (+ off i) (aget d i)))
+                      dlen))
                 ;; digest(bytes) is update(bytes)-then-digest on the JVM: the
                 ;; accumulated update bytes come FIRST, not instead. Dropping
                 ;; them made clj-uuid's namespaced v3/v5 uuids — digest-bytes
@@ -724,7 +787,7 @@
                                          (conj acc (as-ba (first args)))
                                          acc))]
                   (tput! self :acc [])
-                  (digest (tget self :md) (tget self :len) body)))
+                  (digest (tget self :md) (tget self :len) body))))
      "reset" (fn [self] (tput! self :acc []) nil)})
 
   ;; java.security.SecureRandom — real RAND_bytes (http-client's stub only made
@@ -876,15 +939,16 @@
   (__register-class-methods! :jolt.crypto/signature
     {"initSign" (fn [self key & _] (tput! self :key (->ba key)) (tput! self :acc []) nil)
      "initVerify" (fn [self key & _] (tput! self :key (->ba key)) (tput! self :acc []) nil)
-     "update" (fn [self data & _]
-                (tput! self :acc (conj (tget self :acc) (snapshot-ba data)))
+     "update" (fn [self data & more]
+                (tput! self :acc (conj (tget self :acc) (consume-update-args data more)))
                 nil)
      "sign" (fn [self & _]
               (let [body (concat-bas (tget self :acc))]
                 (tput! self :acc [])
                 (pkey-sign (tget self :md) (tget self :key) body (tget self :key-algo))))
-     "verify" (fn [self sig & _]
-                (let [body (concat-bas (tget self :acc))]
+     "verify" (fn [self sig & more]
+                (let [body (concat-bas (tget self :acc))
+                      sig (if (= 2 (count more)) (ba-window sig (first more) (second more)) sig)]
                   (tput! self :acc [])
                   (pkey-verify (tget self :md) (tget self :key) body sig (tget self :key-algo))))
      "getAlgorithm" (fn [self] (tget self :algo))})
