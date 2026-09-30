@@ -127,7 +127,39 @@
                  win (byte-array (concat (map int "the window") (repeat 54 65)))
                  enc (Cipher/getInstance "AES/CBC/PKCS5Padding")]
              (.init enc Cipher/ENCRYPT_MODE (SecretKeySpec. key "AES"))
-             (ba= msg (decrypt key (.getIV enc) (.doFinal enc win 0 (alength msg))))))))
+             (ba= msg (decrypt key (.getIV enc) (.doFinal enc win 0 (alength msg))))))
+    (check "a streaming read loop hashes only the bytes read"
+           ;; 70000 bytes through a 64 KiB buffer: the second read is short.
+           (let [data (byte-array (map #(unchecked-byte (mod % 251)) (range 70000)))
+                 expected (hex (.digest (MessageDigest/getInstance "SHA-256") data))
+                 in (java.io.ByteArrayInputStream. data)
+                 md (MessageDigest/getInstance "SHA-256")
+                 buf (byte-array 65536)]
+             (loop [] (let [n (.read in buf)] (when (pos? n) (.update md buf 0 n) (recur))))
+             (= expected (hex (.digest md)))))
+    (check "SecretKeySpec(key, off, len, algo) keeps the window and algorithm"
+           (let [spec (SecretKeySpec. (byte-array (range 32)) 8 16 "HmacSHA256")]
+             (and (ba= (byte-array (range 8 24)) (.getEncoded spec))
+                  (= "HmacSHA256" (.getAlgorithm spec)))))
+    (check "SecretKeySpec(key, algo) reports its algorithm"
+           (= "HmacSHA256" (.getAlgorithm (SecretKeySpec. k "HmacSHA256"))))
+    (check "IvParameterSpec(iv, off, len) keeps the window"
+           (let [key (byte-array (range 16))
+                 ivs (byte-array (range 32))
+                 iv (byte-array (range 4 20))
+                 enc (Cipher/getInstance "AES/CBC/PKCS5Padding")]
+             (.init enc Cipher/ENCRYPT_MODE (SecretKeySpec. key "AES") (IvParameterSpec. ivs 4 16))
+             (ba= foo (decrypt key iv (.doFinal enc foo)))))
+    (check "Signature.verify(sig, off, len) verifies the window"
+           (let [data (byte-array (map int "sign me"))
+                 kp (.genKeyPair (KeyPairGenerator/getInstance "EC"))
+                 s (-> (doto (Signature/getInstance "SHA256withECDSA")
+                         (.initSign (.getPrivate kp)) (.update data))
+                       .sign)
+                 padded (byte-array (concat [1 2 3] (seq s) [4 5 6]))]
+             (-> (doto (Signature/getInstance "SHA256withECDSA")
+                   (.initVerify (.getPublic kp)) (.update data))
+                 (.verify padded 3 (alength s)))))))
 
 ;; A self-signed EC certificate: CN=jolt.test, O=Jolt, C=US, serial 0x12345678,
 ;; valid 2026-01-01 to 2036-01-01, ecdsa-with-SHA256. Every expected value

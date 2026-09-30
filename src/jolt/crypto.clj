@@ -689,9 +689,20 @@
 (defn install! []
   ;; javax.crypto.spec.SecretKeySpec / IvParameterSpec — key + IV holders.
   (doseq [nm ["SecretKeySpec" "javax.crypto.spec.SecretKeySpec"]]
-    (__register-class-ctor! nm (fn [key & _] (doto (tt :jolt.crypto/key) (tput! :bytes (byte-array key))))))
+    ;; (key algo) or (key off len algo) — the four-arg form keys on a window.
+    (__register-class-ctor! nm (fn [key & more]
+                                 (let [[bs algo] (if (= 3 (count more))
+                                                   [(ba-window key (first more) (second more)) (nth more 2)]
+                                                   [(byte-array key) (first more)])]
+                                   (doto (tt :jolt.crypto/key)
+                                     (tput! :bytes bs)
+                                     (tput! :algo (some-> algo str)))))))
   (doseq [nm ["IvParameterSpec" "javax.crypto.spec.IvParameterSpec"]]
-    (__register-class-ctor! nm (fn [iv & _] (doto (tt :jolt.crypto/iv) (tput! :bytes (byte-array iv))))))
+    (__register-class-ctor! nm (fn [iv & more]
+                                 (doto (tt :jolt.crypto/iv)
+                                   (tput! :bytes (if (= 2 (count more))
+                                                   (ba-window iv (first more) (second more))
+                                                   (byte-array iv)))))))
   (__register-class-methods! :jolt.crypto/key {"getEncoded" (fn [self] (tget self :bytes))
                                                "getAlgorithm" (fn [self] (or (tget self :algo) "AES"))})
 
@@ -935,8 +946,9 @@
               (let [body (concat-bas (tget self :acc))]
                 (tput! self :acc [])
                 (pkey-sign (tget self :md) (tget self :key) body (tget self :key-algo))))
-     "verify" (fn [self sig & _]
-                (let [body (concat-bas (tget self :acc))]
+     "verify" (fn [self sig & more]
+                (let [body (concat-bas (tget self :acc))
+                      sig (if (= 2 (count more)) (ba-window sig (first more) (second more)) sig)]
                   (tput! self :acc [])
                   (pkey-verify (tget self :md) (tget self :key) body sig (tget self :key-algo))))
      "getAlgorithm" (fn [self] (tget self :algo))})
