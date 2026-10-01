@@ -68,8 +68,31 @@ The shims register through Jolt's host-shim hooks (`__register-class-ctor!` /
 and loaded before the namespace; an app that also pulls http-client shares the
 one loaded copy (jolt.deps reconciles natives).
 
+## OpenSSL
+
+The library needs OpenSSL 3 at runtime. It is looked for in:
+
+- **macOS:** Homebrew (`/opt/homebrew/opt/openssl@3/lib`, `/usr/local/opt/openssl@3/lib`),
+  MacPorts (`/opt/local/lib`), then `libcrypto.3.dylib` / `libssl.3.dylib` on the
+  dynamic loader's path. Never `/usr/lib/libcrypto.dylib`: that is Apple's stub,
+  and opening it aborts the process. Without OpenSSL installed the program fails
+  with jolt's "required native library crypto not found" instead.
+- **Linux:** `libcrypto.so.3`, `libcrypto.so.1.1`, `libcrypto.so` (and the `libssl` equivalents).
+- **Windows:** `libcrypto-3-x64.dll` and the other names OpenSSL's builds ship, beside
+  the executable or on `PATH`.
+
+To link OpenSSL into a `jolt build` binary instead, add the static archives
+in your app's `deps.edn`. The library already declares what `libcrypto.a`
+itself links against (`:link-libs`: `ws2_32 gdi32 crypt32` on Windows,
+`dl pthread` on Linux), which jolt 0.8.16 and later add to the link:
+
+```clojure
+:jolt/native [{:name "crypto" :static {:archive "/mingw64/lib/libcrypto.a"}}
+              {:name "ssl"    :static {:archive "/mingw64/lib/libssl.a"}}]
+```
+
 ## Test
 
 ```
-joltc -M:test
+jolt -M:test
 ```

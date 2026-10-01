@@ -44,15 +44,35 @@
  ;; jolt's own Maven fetcher already looks for (stdlib/jolt/mvn_http.clj). They
  ;; are bare, so the standard loader search order applies: the executable's
  ;; directory (the DLLs beside jolt.exe) and PATH both work.
+ ;;
+ ;; macOS: never /usr/lib/libcrypto.dylib or a bare "libcrypto.dylib", which
+ ;; dyld resolves to the same file. That is Apple's stub, and it ABORTS the
+ ;; process that opens it ("loading libcrypto in an unsafe way") — a machine
+ ;; without OpenSSL installed died instead of reporting the library missing. The
+ ;; candidates are where OpenSSL 3 is installed (Homebrew on Apple silicon and on
+ ;; Intel, MacPorts), then the versioned bare name, which dyld does not map to
+ ;; the stub and finds on DYLD_LIBRARY_PATH or the default fallback path
+ ;; (/usr/local/lib holds Homebrew's links on Intel).
+ ;;
+ ;; :link-libs is what libcrypto.a itself links against — OpenSSL's own
+ ;; Libs.private for its mingw and linux targets — for an app that links these
+ ;; libraries statically by overlaying a :static archive (jolt 0.8.16 and later;
+ ;; an older jolt ignores the key). libssl.a needs nothing beyond libcrypto.
  :jolt/native [{:name "crypto"
-                :darwin  ["/opt/homebrew/opt/openssl@3/lib/libcrypto.dylib"
-                          "/usr/lib/libcrypto.dylib" "libcrypto.dylib"]
+                :darwin  ["/opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib"
+                          "/usr/local/opt/openssl@3/lib/libcrypto.3.dylib"
+                          "/opt/local/lib/libcrypto.3.dylib"
+                          "libcrypto.3.dylib"]
                 :linux   ["libcrypto.so.3" "libcrypto.so.1.1" "libcrypto.so"]
                 :windows ["libcrypto-3-x64.dll" "libcrypto-3.dll"
-                          "libcrypto-1_1-x64.dll" "libcrypto.dll"]}
+                          "libcrypto-1_1-x64.dll" "libcrypto.dll"]
+                :link-libs {:windows ["ws2_32" "gdi32" "crypt32"]
+                            :linux   ["dl" "pthread"]}}
                {:name "ssl"
-                :darwin  ["/opt/homebrew/opt/openssl@3/lib/libssl.dylib"
-                          "/usr/lib/libssl.dylib" "libssl.dylib"]
+                :darwin  ["/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib"
+                          "/usr/local/opt/openssl@3/lib/libssl.3.dylib"
+                          "/opt/local/lib/libssl.3.dylib"
+                          "libssl.3.dylib"]
                 :linux   ["libssl.so.3" "libssl.so.1.1" "libssl.so"]
                 :windows ["libssl-3-x64.dll" "libssl-3.dll"
                           "libssl-1_1-x64.dll" "libssl.dll"]}]
