@@ -252,7 +252,22 @@
     (doseq [{:keys [name windows]} natives
             dll windows]
       (check (str name " windows candidate " dll " is a DLL")
-             (str/ends-with? dll ".dll")))))
+             (str/ends-with? dll ".dll")))
+    ;; macOS ships unversioned libcrypto.dylib / libssl.dylib stubs in /usr/lib
+    ;; that abort any process that opens them ("loading libcrypto in an unsafe
+    ;; way"), and a bare unversioned name resolves to them — so a missing
+    ;; OpenSSL killed the program instead of failing to load. Only real install
+    ;; paths and versioned names, which dyld does not map to the stubs.
+    (doseq [{:keys [name darwin]} natives
+            c darwin]
+      (check (str name " darwin candidate " c " cannot reach Apple's stub")
+             (and (not (str/starts-with? c "/usr/lib/"))
+                  (not (#{"libcrypto.dylib" "libssl.dylib"} c)))))
+    ;; libcrypto.a's own system libraries, for an app that links it statically
+    ;; (:static overlay); the Libs.private of OpenSSL's mingw and linux targets
+    (check "crypto declares the system libraries its static archive needs"
+           (= {:windows ["ws2_32" "gdi32" "crypt32"] :linux ["dl" "pthread"]}
+              (:link-libs (first (filter #(= "crypto" (:name %)) natives)))))))
 
 (defn -main [& _]
   (test-native-declarations)
