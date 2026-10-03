@@ -82,9 +82,8 @@ The library needs OpenSSL 3 at runtime. It is looked for in:
   the executable or on `PATH`.
 
 To link OpenSSL into a `jolt build` binary instead, add the static archives
-in your app's `deps.edn`. The library already declares what `libcrypto.a`
-itself links against (`:link-libs`: `ws2_32 gdi32 crypt32` on Windows,
-`dl pthread` on Linux), which jolt 0.8.16 and later add to the link:
+in your app's `deps.edn`. jolt links the system libraries `libcrypto.a` needs
+itself; on Windows that takes jolt 0.8.16 or later, which added `crypt32`:
 
 ```clojure
 :jolt/native [{:name "crypto" :static {:archive "/mingw64/lib/libcrypto.a"}}

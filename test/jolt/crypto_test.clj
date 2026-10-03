@@ -262,12 +262,7 @@
             c darwin]
       (check (str name " darwin candidate " c " cannot reach Apple's stub")
              (and (not (str/starts-with? c "/usr/lib/"))
-                  (not (#{"libcrypto.dylib" "libssl.dylib"} c)))))
-    ;; libcrypto.a's own system libraries, for an app that links it statically
-    ;; (:static overlay); the Libs.private of OpenSSL's mingw and linux targets
-    (check "crypto declares the system libraries its static archive needs"
-           (= {:windows ["ws2_32" "gdi32" "crypt32"] :linux ["dl" "pthread"]}
-              (:link-libs (first (filter #(= "crypto" (:name %)) natives)))))))
+                  (not (#{"libcrypto.dylib" "libssl.dylib"} c)))))))
 
 (defn -main [& _]
   (test-native-declarations)
