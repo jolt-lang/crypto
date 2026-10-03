@@ -53,11 +53,6 @@
  ;; Intel, MacPorts), then the versioned bare name, which dyld does not map to
  ;; the stub and finds on DYLD_LIBRARY_PATH or the default fallback path
  ;; (/usr/local/lib holds Homebrew's links on Intel).
- ;;
- ;; :link-libs is what libcrypto.a itself links against — OpenSSL's own
- ;; Libs.private for its mingw and linux targets — for an app that links these
- ;; libraries statically by overlaying a :static archive (jolt 0.8.16 and later;
- ;; an older jolt ignores the key). libssl.a needs nothing beyond libcrypto.
  :jolt/native [{:name "crypto"
                 :darwin  ["/opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib"
                           "/usr/local/opt/openssl@3/lib/libcrypto.3.dylib"
@@ -65,9 +60,7 @@
                           "libcrypto.3.dylib"]
                 :linux   ["libcrypto.so.3" "libcrypto.so.1.1" "libcrypto.so"]
                 :windows ["libcrypto-3-x64.dll" "libcrypto-3.dll"
-                          "libcrypto-1_1-x64.dll" "libcrypto.dll"]
-                :link-libs {:windows ["ws2_32" "gdi32" "crypt32"]
-                            :linux   ["dl" "pthread"]}}
+                          "libcrypto-1_1-x64.dll" "libcrypto.dll"]}
                {:name "ssl"
                 :darwin  ["/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib"
                           "/usr/local/opt/openssl@3/lib/libssl.3.dylib"
