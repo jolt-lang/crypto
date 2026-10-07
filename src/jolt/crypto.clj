@@ -8,9 +8,9 @@
     MessageDigest SHA-512 / SHA-384 / SHA-256 / SHA-224 / SHA-1 / MD5
     SecureRandom  RAND_bytes
     SecretKeySpec / IvParameterSpec   key + IV holders
-    KeyPairGenerator / KeyFactory / Signature   EC over the NIST P-curves and
-                  RSA, with X509EncodedKeySpec / PKCS8EncodedKeySpec /
-                  ECGenParameterSpec
+    KeyPairGenerator / KeyFactory / Signature   EC over the NIST P-curves,
+                  RSA and Ed25519, with X509EncodedKeySpec /
+                  PKCS8EncodedKeySpec / ECGenParameterSpec
     CertificateFactory   X.509 certificates from PEM or DER, as X509Certificate
                   values (subject/issuer X500Principal, validity, serial,
                   signature algorithm, public key, getEncoded)
@@ -87,6 +87,15 @@
 (ffi/defcfn c-bn-set-word  "BN_set_word"         [:pointer :ulong] :int)
 (ffi/defcfn c-bn-free      "BN_free"             [:pointer] :void)
 (ffi/defcfn c-pkey-set-rsa "EVP_PKEY_set1_RSA"   [:pointer :pointer] :int)
+
+;; Ed25519 keygen goes through an EVP_PKEY_CTX for the key type (NID 1087).
+;; These are exported functions in both 1.1.1 and 3. Signing needs nothing
+;; new: EVP_DigestSign/EVP_DigestVerify with a NULL digest are Ed25519's
+;; one-shot (PureEdDSA) path.
+(ffi/defcfn c-pkey-ctx-new-id  "EVP_PKEY_CTX_new_id"  [:int :pointer] :pointer)
+(ffi/defcfn c-pkey-keygen-init "EVP_PKEY_keygen_init" [:pointer] :int)
+(ffi/defcfn c-pkey-keygen      "EVP_PKEY_keygen"      [:pointer :pointer] :int)
+(ffi/defcfn c-pkey-ctx-free    "EVP_PKEY_CTX_free"    [:pointer] :void)
 
 ;; What a parsed key actually is. EVP_PKEY_base_id is a real function in 1.1 but
 ;; a macro for EVP_PKEY_get_base_id in 3, so neither spelling resolves on both;
@@ -302,6 +311,25 @@
     (c-err-clear)
     algo))
 
+;; Ed25519's AlgorithmIdentifier, SEQUENCE { OID 1.3.101.112 } with no
+;; parameters. OpenSSL has no accessor for an Ed25519 key that is an exported
+;; function in both 1.1 and 3 (EVP_PKEY_id is a macro in 3, EVP_PKEY_get_id
+;; absent in 1.1), so the key type is read from the DER instead. It sits right
+;; after the outer SEQUENCE header in SubjectPublicKeyInfo and after the version
+;; INTEGER in PKCS#8; Ed25519 keys are short, so both lengths are one byte.
+(def ^:private ed25519-algorithm-id [0x30 0x05 0x06 0x03 0x2b 0x65 0x70])
+
+(defn- ed25519-der? [der]
+  (let [b (mapv #(bit-and % 0xff) (take 12 (seq (as-ba der))))
+        at? (fn [i] (= ed25519-algorithm-id (subvec b (min i (count b)) (min (+ i 7) (count b)))))]
+    (and (= 0x30 (first b)) (or (at? 2) (at? 5)))))
+
+(defn- key-algo
+  "The algorithm of a DER key and its parsed EVP_PKEY: \"EdDSA\" (the JDK's
+  name for an Ed25519 key), \"EC\", \"RSA\", or nil."
+  [der pkey]
+  (if (ed25519-der? der) "EdDSA" (pkey-algo pkey)))
+
 (defn- check-key-algo
   "Refuse a key that is not the algorithm the caller asked for, as the JDK does
   rather than quietly signing with whatever the key happens to be. Only a
@@ -359,20 +387,47 @@
           (finally (c-pkey-free pkey))))
       (finally (c-bn-free e) (c-rsa-free rsa)))))
 
+(def ^:private nid-ed25519 1087)
+
+(defn generate-ed25519-keypair
+  "Generate an Ed25519 keypair. Returns {:public <X.509 DER> :private <PKCS#8 DER>},
+  the same two encodings the JVM's getEncoded hands back."
+  []
+  (let [ctx (c-pkey-ctx-new-id nid-ed25519 ffi/null)]
+    (when (ffi/null? ctx) (throw (ex-info "Ed25519 key setup failed" {})))
+    (try
+      (when (not= 1 (c-pkey-keygen-init ctx)) (throw (ex-info "Ed25519 keygen init failed" {})))
+      (let [holder (ffi/alloc ptr-size)]
+        (try
+          (ffi/write holder :pointer ffi/null 0)
+          (when (not= 1 (c-pkey-keygen ctx holder)) (throw (ex-info "Ed25519 key generation failed" {})))
+          (let [pkey (ffi/read holder :pointer)]
+            (try
+              (let [p8 (c-pkey->p8 pkey)]
+                (when (ffi/null? p8) (throw (ex-info "PKCS#8 conversion failed" {})))
+                (try {:public (der-out c-i2d-pubkey pkey) :private (der-out c-i2d-p8 p8)}
+                     (finally (c-p8-free p8))))
+              (finally (c-pkey-free pkey))))
+          (finally (ffi/free holder))))
+      (finally (c-pkey-ctx-free ctx)))))
+
 (defn- generate-keypair-for
   "Draw a keypair from a KeyPairGenerator shim's state: {:public :private
   :algo}, ready for the keypair shim."
   [self]
-  (let [{:keys [public private]} (if (= "RSA" (tget self :algo))
-                                   (generate-rsa-keypair (tget self :bits))
+  (let [{:keys [public private]} (case (tget self :algo)
+                                   "RSA" (generate-rsa-keypair (tget self :bits))
+                                   "EdDSA" (generate-ed25519-keypair)
                                    (generate-ec-keypair (tget self :curve)))]
     (doto (tt :jolt.crypto/keypair)
       (tput! :public public) (tput! :private private) (tput! :algo (tget self :algo)))))
 
 (defn pkey-sign
-  "Sign `data` with a PKCS#8 DER private key, digesting with md-fn. The result
-  is what Signature.sign returns on the JVM for that key: a DER-encoded ECDSA
-  SEQUENCE of r and s for an EC key, the raw PKCS#1 v1.5 ciphertext for RSA.
+  "Sign `data` with a PKCS#8 DER private key, digesting with md-fn (nil for
+  Ed25519, which hashes internally). The result is what Signature.sign returns
+  on the JVM for that key: a DER-encoded ECDSA SEQUENCE of r and s for an EC
+  key, the raw PKCS#1 v1.5 ciphertext for RSA, the 64-byte RFC 8032 signature
+  for Ed25519.
   EVP picks the primitive from the key itself, so the same call serves both —
   and so `want-algo`, when given, is what stops a key of the other algorithm
   producing a signature the named algorithm did not ask for."
@@ -380,12 +435,12 @@
   ([md-fn priv-der data want-algo]
    (with-der-key c-d2i-privkey priv-der
      (fn [pkey]
-       (check-key-algo want-algo (pkey-algo pkey))
+       (check-key-algo want-algo (key-algo priv-der pkey))
        (let [data (as-ba data) dn (alength data)
              ctx (c-md-ctx-new) dp (ffi/alloc (max 1 dn)) lenp (ffi/alloc 8)]
          (try
            (ffi/write-array dp data)
-           (when (not= 1 (c-dgst-sign-init ctx ffi/null (md-fn) ffi/null pkey))
+           (when (not= 1 (c-dgst-sign-init ctx ffi/null (if md-fn (md-fn) ffi/null) ffi/null pkey))
              (throw (ex-info "signature init failed" {})))
            ;; a null signature buffer asks for the maximum size rather than signing
            (ffi/write lenp :size_t 0 0)
@@ -401,19 +456,20 @@
 
 (defn pkey-verify
   "Verify a signature over `data` against an X.509 DER public key, digesting
-  with md-fn. The signature format is the key algorithm's (DER ECDSA r/s, raw
-  PKCS#1 v1.5 RSA); `want-algo`, when given, holds the key to that algorithm."
+  with md-fn (nil for Ed25519). The signature format is the key algorithm's
+  (DER ECDSA r/s, raw PKCS#1 v1.5 RSA, 64-byte Ed25519); `want-algo`, when
+  given, holds the key to that algorithm."
   ([md-fn pub-der data sig] (pkey-verify md-fn pub-der data sig nil))
   ([md-fn pub-der data sig want-algo]
    (with-der-key c-d2i-pubkey pub-der
      (fn [pkey]
-       (check-key-algo want-algo (pkey-algo pkey))
+       (check-key-algo want-algo (key-algo pub-der pkey))
        (let [data (as-ba data) sig (as-ba sig) dn (alength data) sn (alength sig)
              ctx (c-md-ctx-new) dp (ffi/alloc (max 1 dn)) sp (ffi/alloc (max 1 sn))]
          (try
            (ffi/write-array dp data)
            (ffi/write-array sp sig)
-           (when (not= 1 (c-dgst-verify-init ctx ffi/null (md-fn) ffi/null pkey))
+           (when (not= 1 (c-dgst-verify-init ctx ffi/null (if md-fn (md-fn) ffi/null) ffi/null pkey))
              (throw (ex-info "verification init failed" {})))
            ;; a bad signature is a false, not a throw: EVP reports both the same way
            (= 1 (c-dgst-verify ctx sp sn dp dn))
@@ -616,6 +672,9 @@
     "SHA256WITHRSA"   [c-sha256 "RSA"]
     "SHA224WITHRSA"   [c-sha224 "RSA"]
     "SHA1WITHRSA"     [c-sha1   "RSA"]
+    ;; PureEdDSA hashes internally: no digest, one-shot over the whole message
+    "ED25519"         [nil "EdDSA"]
+    "EDDSA"           [nil "EdDSA"]
     (throw (ex-info (str "unsupported Signature algorithm: " algo) {:algo algo}))))
 
 (defn- digest-spec [algo]
@@ -862,6 +921,8 @@
                          ;; the JDK's default RSA size is 2048
                          "RSA" (doto (tt :jolt.crypto/keypair-gen)
                                  (tput! :algo "RSA") (tput! :bits 2048))
+                         ;; the JDK's EdDSA generator defaults to Ed25519
+                         ("ED25519" "EDDSA") (doto (tt :jolt.crypto/keypair-gen) (tput! :algo "EdDSA"))
                          (throw (ex-info (str "unsupported KeyPairGenerator algorithm: " algo) {:algo algo}))))}))
   (__register-class-methods! :jolt.crypto/keypair-gen
     {;; initialize(AlgorithmParameterSpec) names the curve; initialize(int) gives
@@ -869,7 +930,13 @@
      ;; for RSA is the modulus length. The curve is resolved here rather than at
      ;; generate time because that is where the JDK rejects an unknown one.
      "initialize" (fn [self spec & _]
-                    (if (= "RSA" (tget self :algo))
+                    (cond
+                      ;; Ed25519 has one size: 255 bits, as the JDK takes it
+                      (= "EdDSA" (tget self :algo))
+                      (when-not (and (not (table? spec)) (= 255 (long spec)))
+                        (throw (ex-info (str "unsupported EdDSA parameter: " spec) {:spec spec})))
+
+                      (= "RSA" (tget self :algo))
                       (do
                         (when (table? spec)
                           (throw (ex-info (str "unsupported RSA parameter: " spec) {:spec spec})))
@@ -878,6 +945,7 @@
                             (throw (ex-info (str "RSA key size must be between 512 and 16384 bits, got " bits)
                                             {:bits bits})))
                           (tput! self :bits bits)))
+                      :else
                       (let [curve (if (and (table? spec) (= :jolt.crypto/ec-params (tget spec :jolt/type)))
                                     (tget spec :curve)
                                     (case (long spec)
@@ -909,17 +977,18 @@
                        (case (str/upper-case (str algo))
                          "EC" (doto (tt :jolt.crypto/key-factory) (tput! :algo "EC"))
                          "RSA" (doto (tt :jolt.crypto/key-factory) (tput! :algo "RSA"))
+                         ("ED25519" "EDDSA") (doto (tt :jolt.crypto/key-factory) (tput! :algo "EdDSA"))
                          (throw (ex-info (str "unsupported KeyFactory algorithm: " algo) {:algo algo}))))}))
   (__register-class-methods! :jolt.crypto/key-factory
     {"generatePublic" (fn [self spec]
                         (let [der (->ba spec)
-                              algo (with-der-key c-d2i-pubkey der pkey-algo)]
+                              algo (with-der-key c-d2i-pubkey der #(key-algo der %))]
                           (check-key-algo (tget self :algo) algo)
                           (doto (tt :jolt.crypto/public-key)
                             (tput! :bytes der) (tput! :algo (or algo (tget self :algo))))))
      "generatePrivate" (fn [self spec]
                          (let [der (->ba spec)
-                               algo (with-der-key c-d2i-privkey der pkey-algo)]
+                               algo (with-der-key c-d2i-privkey der #(key-algo der %))]
                            (check-key-algo (tget self :algo) algo)
                            (doto (tt :jolt.crypto/private-key)
                              (tput! :bytes der) (tput! :algo (or algo (tget self :algo))))))

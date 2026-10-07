@@ -11,9 +11,9 @@ OpenSSL (`libcrypto`) through `jolt.ffi`, and exposed as the slice of the
 | `java.security.MessageDigest` | `SHA-512`, `SHA-384`, `SHA-256`, `SHA-224`, `SHA-1`, `MD5` |
 | `java.security.SecureRandom` | `RAND_bytes`-backed `nextBytes` / `generateSeed` / `nextInt` / `nextLong` / `nextDouble` / `nextFloat` / `nextBoolean` |
 | `javax.crypto.spec.SecretKeySpec` / `IvParameterSpec` | key + IV holders |
-| `java.security.KeyPairGenerator` | EC keygen over P-256 / P-384 / P-521 / secp256k1, and RSA keygen (512–16384 bits, default 2048, exponent 65537) |
-| `java.security.Signature` | `SHA1`/`SHA224`/`SHA256`/`SHA384`/`SHA512withECDSA` and `…withRSA` |
-| `java.security.KeyFactory` | EC and RSA keys from encoded DER |
+| `java.security.KeyPairGenerator` | EC keygen over P-256 / P-384 / P-521 / secp256k1, RSA keygen (512–16384 bits, default 2048, exponent 65537), and Ed25519 (`Ed25519` / `EdDSA`) |
+| `java.security.Signature` | `SHA1`/`SHA224`/`SHA256`/`SHA384`/`SHA512withECDSA`, `…withRSA`, and `Ed25519` / `EdDSA` |
+| `java.security.KeyFactory` | EC, RSA and Ed25519 keys from encoded DER |
 | `java.security.spec.ECGenParameterSpec` / `X509EncodedKeySpec` / `PKCS8EncodedKeySpec` | curve name + DER key holders |
 | `java.security.cert.CertificateFactory` | `X.509` certificates from PEM (one or a bundle) or DER, via `generateCertificate` / `generateCertificates` |
 | `java.security.cert.X509Certificate` | subject / issuer (`X500Principal` and `getSubjectDN`), `getNotBefore` / `getNotAfter` / `checkValidity`, serial, version, `getSigAlgName` / `getSigAlgOID`, `getPublicKey`, `getEncoded` |
@@ -48,6 +48,12 @@ takes the primitive from the key rather than from the algorithm name, so
 `Signature` and `KeyFactory` check the two agree and reject a key of the other
 algorithm the way the JDK does, rather than quietly signing with whichever key
 they were handed.
+
+Ed25519 follows the JDK's EdDSA provider (Java 15 and later): `Ed25519` and
+`EdDSA` both name it in `Signature`, `KeyFactory` and `KeyPairGenerator`, keys
+report `getAlgorithm` as `EdDSA`, and `getEncoded` gives the X.509 and PKCS#8
+DER a JVM writes. Signatures are the 64-byte RFC 8032 form, byte for byte what
+the RFC's test vectors give. `initialize` takes 255, Ed25519's one size.
 
 ## Use
 
