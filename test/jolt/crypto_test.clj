@@ -588,6 +588,96 @@
             (try (.generatePublic (KeyFactory/getInstance "RSA") (X509EncodedKeySpec. (byte-array 10)))
                  nil (catch Exception e (.getMessage e)))))
 
+  ;; --- Ed25519 ----------------------------------------------------------------
+  ;; RFC 8032 §7.1's test vectors: Ed25519 is deterministic, so the signature
+  ;; bytes are fixed. The keys go in as the DER a JVM's getEncoded writes:
+  ;; SubjectPublicKeyInfo and PKCS#8 around the raw 32 bytes, OID 1.3.101.112.
+  (let [spki #(unhex (str "302a300506032b6570032100" %))
+        pkcs8 #(unhex (str "302e020100300506032b657004220420" %))
+        vectors [{:secret "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"
+                  :public "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+                  :message ""
+                  :signature (str "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555"
+                                  "fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b")}
+                 {:secret "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb"
+                  :public "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"
+                  :message "72"
+                  :signature (str "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da0"
+                                  "85ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00")}]]
+    (doseq [[i {:keys [secret public message signature]}] (map-indexed vector vectors)
+            algo ["Ed25519" "EdDSA"]]
+      (let [kf (KeyFactory/getInstance algo)
+            sk (.generatePrivate kf (PKCS8EncodedKeySpec. (pkcs8 secret)))
+            pk (.generatePublic kf (X509EncodedKeySpec. (spki public)))
+            msg (unhex message)
+            s (.sign (doto (Signature/getInstance algo) (.initSign sk) (.update msg)))]
+        (check (str "RFC 8032 test " (inc i) " signs to the RFC's bytes (" algo ")")
+               (= signature (hex s)))
+        (check (str "RFC 8032 test " (inc i) " verifies (" algo ")")
+               (.verify (doto (Signature/getInstance algo) (.initVerify pk) (.update msg))
+                        (unhex signature)))
+        (check (str "an Ed25519 key reports EdDSA, as the JDK's does (" algo ")")
+               (and (= "EdDSA" (.getAlgorithm pk)) (= "EdDSA" (.getAlgorithm sk))))
+        (check (str "KeyFactory keeps the DER it was given (" algo ")")
+               (and (= (hex (spki public)) (hex (.getEncoded pk)))
+                    (= (hex (pkcs8 secret)) (hex (.getEncoded sk)))))))
+
+    (let [kp (.generateKeyPair (KeyPairGenerator/getInstance "Ed25519"))
+          pk (.getPublic kp)
+          sk (.getPrivate kp)
+          data (.getBytes "rigging specification")
+          sign (fn [d] (.sign (doto (Signature/getInstance "Ed25519") (.initSign sk) (.update d))))
+          verify (fn [d sig] (.verify (doto (Signature/getInstance "Ed25519") (.initVerify pk) (.update d)) sig))
+          s (sign data)]
+      (check "a generated Ed25519 public key is a 44-byte SubjectPublicKeyInfo"
+             (and (= 44 (alength (.getEncoded pk)))
+                  (str/starts-with? (hex (.getEncoded pk)) "302a300506032b6570032100")))
+      (check "a generated Ed25519 private key is PKCS#8 with the Ed25519 OID"
+             (str/includes? (subs (hex (.getEncoded sk)) 0 32) "300506032b6570"))
+      (check "a generated keypair reports EdDSA" (= "EdDSA" (.getAlgorithm pk)))
+      (check "an Ed25519 signature is 64 bytes" (= 64 (alength s)))
+      (check "Ed25519 is deterministic" (= (hex s) (hex (sign data))))
+      (check "a generated keypair verifies its own signature" (verify data s))
+      (check "a signature over other data does not verify" (not (verify (.getBytes "other data") s)))
+      (check "a tampered signature does not verify"
+             (not (verify data (let [t (aclone s)] (aset-byte t 0 (unchecked-byte (inc (aget t 0)))) t))))
+      (check "update in pieces signs the concatenation"
+             (= (hex s)
+                (hex (.sign (doto (Signature/getInstance "Ed25519") (.initSign sk)
+                              (.update (.getBytes "rigging ")) (.update (.getBytes "specification")))))))
+      (check "an Ed25519 public key round-trips through KeyFactory"
+             (let [pk' (.generatePublic (KeyFactory/getInstance "Ed25519")
+                                        (X509EncodedKeySpec. (.getEncoded pk)))]
+               (.verify (doto (Signature/getInstance "Ed25519") (.initVerify pk') (.update data)) s)))
+      (check "initialize takes Ed25519's one size, 255 bits"
+             (= 44 (alength (.getEncoded (.getPublic (.generateKeyPair
+                                                      (doto (KeyPairGenerator/getInstance "Ed25519")
+                                                        (.initialize 255))))))))
+      (check "initialize refuses any other size"
+             (= :threw (try (.initialize (KeyPairGenerator/getInstance "Ed25519") 256)
+                            :no-throw (catch Exception _ :threw))))
+      (check "EdDSA is the same generator"
+             (= "EdDSA" (.getAlgorithm (.getPublic (.generateKeyPair (KeyPairGenerator/getInstance "EdDSA"))))))
+
+      ;; a key of the other algorithm is refused, as the JDK refuses it
+      (let [ec (.generateKeyPair (KeyPairGenerator/getInstance "EC"))]
+        (check "an Ed25519 Signature refuses an EC key"
+               (= :threw (try (.sign (doto (Signature/getInstance "Ed25519") (.initSign (.getPrivate ec))
+                                       (.update data)))
+                              :no-throw (catch Exception _ :threw))))
+        (check "an ECDSA Signature refuses an Ed25519 key"
+               (= :threw (try (.sign (doto (Signature/getInstance "SHA256withECDSA") (.initSign sk)
+                                       (.update data)))
+                              :no-throw (catch Exception _ :threw))))
+        (check "an EC KeyFactory refuses Ed25519 DER"
+               (= :threw (try (.generatePublic (KeyFactory/getInstance "EC")
+                                               (X509EncodedKeySpec. (.getEncoded pk)))
+                              :no-throw (catch Exception _ :threw))))
+        (check "an Ed25519 KeyFactory refuses EC DER"
+               (= :threw (try (.generatePublic (KeyFactory/getInstance "Ed25519")
+                                               (X509EncodedKeySpec. (.getEncoded (.getPublic ec))))
+                              :no-throw (catch Exception _ :threw)))))))
+
   ;; java.security.SecureRandom — the whole surface, because this registration
   ;; overrides jolt's native class whenever this namespace loads. A narrower shim
   ;; here silently removed nextInt/nextLong from any program that required
