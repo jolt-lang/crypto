@@ -81,11 +81,15 @@ The library needs OpenSSL 3 at runtime. It is looked for in:
 - **macOS:** Homebrew (`/opt/homebrew/opt/openssl@3/lib`, `/usr/local/opt/openssl@3/lib`),
   MacPorts (`/opt/local/lib`), then `libcrypto.3.dylib` / `libssl.3.dylib` on the
   dynamic loader's path. Never `/usr/lib/libcrypto.dylib`: that is Apple's stub,
-  and opening it aborts the process. Without OpenSSL installed the program fails
-  with jolt's "required native library crypto not found" instead.
+  and opening it aborts the process.
 - **Linux:** `libcrypto.so.3`, `libcrypto.so.1.1`, `libcrypto.so` (and the `libssl` equivalents).
 - **Windows:** `libcrypto-3-x64.dll` and the other names OpenSSL's builds ship, beside
   the executable or on `PATH`.
+
+The libraries are declared `:optional`. jolt loads every dependency's natives when
+the program starts, whether or not anything uses them, so an app that only has this
+library somewhere in its dependency tree still starts on a host without OpenSSL. A
+call into it then fails at the call, naming the OpenSSL function it could not find.
 
 To link OpenSSL into a `jolt build` binary instead, add the static archives
 in your app's `deps.edn`. jolt links the system libraries `libcrypto.a` needs

@@ -35,6 +35,13 @@
  ;; namespace, where the foreign-fn bindings resolve at load. An app pulling both
  ;; this and http-client loads each library once — jolt.deps reconciles natives.
  ;;
+ ;; :optional, because jolt loads every dependency's natives at startup whether
+ ;; or not anything requires the namespace that uses them. Required, they made
+ ;; any app with this library in its tree refuse to start on a host without
+ ;; OpenSSL, even one that never touches crypto: ring-chez-adapter carries this
+ ;; library for ring-defaults, so that was every plain web server. Without
+ ;; OpenSSL the app now starts and a crypto call fails when it is made.
+ ;;
  ;; A platform with no key here is searched for NOTHING — jolt.main/load-natives!
  ;; reads exactly the key the running platform selects — so declaring only
  ;; :darwin/:linux made every dependent app fail on Windows with "required native
@@ -53,7 +60,7 @@
  ;; Intel, MacPorts), then the versioned bare name, which dyld does not map to
  ;; the stub and finds on DYLD_LIBRARY_PATH or the default fallback path
  ;; (/usr/local/lib holds Homebrew's links on Intel).
- :jolt/native [{:name "crypto"
+ :jolt/native [{:name "crypto" :optional true
                 :darwin  ["/opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib"
                           "/usr/local/opt/openssl@3/lib/libcrypto.3.dylib"
                           "/opt/local/lib/libcrypto.3.dylib"
@@ -61,7 +68,7 @@
                 :linux   ["libcrypto.so.3" "libcrypto.so.1.1" "libcrypto.so"]
                 :windows ["libcrypto-3-x64.dll" "libcrypto-3.dll"
                           "libcrypto-1_1-x64.dll" "libcrypto.dll"]}
-               {:name "ssl"
+               {:name "ssl" :optional true
                 :darwin  ["/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib"
                           "/usr/local/opt/openssl@3/lib/libssl.3.dylib"
                           "/opt/local/lib/libssl.3.dylib"
