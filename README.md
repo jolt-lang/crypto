@@ -59,7 +59,7 @@ the RFC's test vectors give. `initialize` takes 255, Ed25519's one size.
 
 ```clojure
 ;; deps.edn
-jolt-lang/jolt-crypto {:git/url "https://github.com/jolt-lang/jolt-crypto"
+jolt-lang/jolt-crypto {:git/url "https://github.com/jolt-lang/crypto"
                        :git/sha "..."}
 ```
 
