@@ -245,6 +245,11 @@
   (let [natives (:jolt/native (edn/read-string (slurp "deps.edn")))]
     (check "deps.edn declares libcrypto and libssl"
            (= #{"crypto" "ssl"} (set (map :name natives))))
+    ;; jolt loads every dependency's natives at startup, so a required one made
+    ;; any app with this library in its tree refuse to start without OpenSSL,
+    ;; used or not (ring-chez-adapter carries it for ring-defaults).
+    (doseq [{:keys [name optional]} natives]
+      (check (str name " is :optional") (true? optional)))
     (doseq [{:keys [name] :as spec} natives
             plat [:darwin :linux :windows]]
       (check (str name " declares " plat " candidates")
