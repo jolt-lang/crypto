@@ -44,6 +44,7 @@
 (ffi/defcfn t-verify-cert     "X509_verify_cert"            [:pointer] :int)
 (ffi/defcfn t-sctx-error      "X509_STORE_CTX_get_error"    [:pointer] :int)
 (ffi/defcfn t-err-clear       "ERR_clear_error"             [] :void)
+(ffi/defcfn t-err-peek        "ERR_peek_error"              [] :ulong)
 
 (def ^:private ptr-size (ffi/sizeof :pointer))
 
@@ -254,9 +255,10 @@
 
 (defn- test-names []
   (let [kp (keypair "EC")
-        dn (fn [s] (.getName (.getSubjectX500Principal
-                              (x509/certificate {:subject s :public-key (.getPublic kp)
-                                                 :signing-key (.getPrivate kp)}))))]
+        dn (fn [s] (try (.getName (.getSubjectX500Principal
+                                   (x509/certificate {:subject s :public-key (.getPublic kp)
+                                                      :signing-key (.getPrivate kp)})))
+                        (catch Exception e [:threw (ex-message e)])))]
     (check "attribute order is kept" (= "CN=a,OU=b,O=c,L=d,ST=e,C=US" (dn "CN=a,OU=b,O=c,L=d,ST=e,C=US")))
     (check "an escaped comma round-trips" (= "CN=Example\\, Inc.,O=x" (dn "CN=Example\\, Inc.,O=x")))
     (check "an escaped plus round-trips" (= "CN=a\\+b" (dn "CN=a\\+b")))
@@ -270,7 +272,23 @@
              (some #(= want %) (partition (count want) 1 (seq der)))))
     (check "hex escapes are UTF-8" (= (dn "CN=é") (dn "CN=\\C3\\A9")))
     (check "lower-case attribute names" (= "CN=a,DC=example,DC=com" (dn "cn=a,dc=example,dc=com")))
-    (check "a dotted OID names an attribute" (= "CN=byoid" (dn "2.5.4.3=byoid")))))
+    (check "a dotted OID names an attribute" (= "CN=byoid" (dn "2.5.4.3=byoid")))
+    ;; X500Principal takes the RFC 1779 OID. prefix, in either case
+    (check "an OID. prefix names an attribute" (= "CN=x" (dn "OID.2.5.4.3=x")))
+    (check "an oid. prefix too" (= "CN=x" (dn "oid.2.5.4.3=x")))
+    ;; X500Principal drops a trailing space after an escaped backslash
+    ;; ("CN=a\\\\ " is CN=a\\) and keeps an escaped one ("CN=a\\ ")
+    (check "a space after an escaped backslash is trimmed" (= "CN=a\\\\" (dn "CN=a\\\\ ")))
+    (check "an escaped trailing space is kept" (= (dn "CN=a\\20") (dn "CN=a\\ ")))
+    ;; RFC 4514 and X500Principal trim spaces only, so a tab stays in the value
+    (let [utf8-in-der? (fn [subject value]
+                         (let [der (.getEncoded (x509/certificate {:subject subject :public-key (.getPublic kp)
+                                                                   :signing-key (.getPrivate kp)}))
+                               bs (seq (.getBytes ^String value "UTF-8"))
+                               want (concat [12 (count bs)] bs)]
+                           (boolean (some #(= want %) (partition (count want) 1 (seq der))))))]
+      (check "a leading tab is part of the value" (utf8-in-der? "CN=\ta" "\ta"))
+      (check "a trailing tab is part of the value" (utf8-in-der? "CN=a\t" "a\t")))))
 
 (defn- test-validation []
   (let [kp (keypair "EC") kp2 (keypair "EC")
@@ -320,7 +338,43 @@
     (check "generate: :issuer without :signing-key" (rejects? ":signing-key" #(x509/generate {:subject "CN=x" :issuer ca})))
     (check "generate: :signing-key without :issuer"
            (rejects? ":signing-key" #(x509/generate {:subject "CN=x" :signing-key (.getPrivate kp)})))
+    ;; X500Principal decodes #hex as a BER value; this builder refuses it
+    ;; rather than storing the text "#0c03616263"
+    (check "a #hex BER value is refused" (rejects? "#" (cert! {:subject "CN=#0c03616263"})))
+    (check "hex escapes that are not UTF-8 are refused" (rejects? "UTF-8" (cert! {:subject "CN=\\C3"})))
+    (doseq [ip ["1.2.3.4abc" "1.2.3.4,x" "1.2.3.4 " "+1.2.3.4" "1.2.3.4.5" " 1.2.3.4" "01.2.3.4" "::ffff:1.2.3.4x"]]
+      (check (str "a malformed IP " (pr-str ip) " is refused")
+             (rejects? "bad IP address" (cert! {:san [[:ip ip]]}))))
+    (check "an IPv4-mapped IPv6 address is accepted"
+           (ip? (x509/certificate (merge base {:san [[:ip "::ffff:1.2.3.4"]]})) "::ffff:1.2.3.4"))
+    (check "a CA keyUsage without :key-cert-sign is refused"
+           (rejects? ":key-cert-sign" (cert! {:ca? true :key-usage #{:digital-signature}})))
+    (check ":key-usage as a map is refused" (rejects? "a set" (cert! {:key-usage {:digital-signature true}})))
+    (check "generate: :key-size with :ed25519"
+           (rejects? ":key-size" #(x509/generate {:subject "CN=x" :key-type :ed25519 :key-size 256})))
     (check "generate: :public-key is not an option" (rejects? ":public-key" #(x509/generate {:subject "CN=x" :public-key (.getPublic kp)})))))
+
+(defn- push-stale-error!
+  "Leave an unrelated error on this thread's OpenSSL queue, as other code can."
+  []
+  (let [junk (byte-array [1 2 3 4])
+        buf (ffi/alloc 4) holder (ffi/alloc ptr-size)]
+    (try (ffi/write-array buf junk) (ffi/write holder :pointer buf 0)
+         (t-d2i-x509 ffi/null holder 4)
+         (finally (ffi/free buf) (ffi/free holder))))
+  (pos? (t-err-peek)))
+
+(defn- test-error-queue []
+  (let [kp (keypair "EC")
+        base {:subject "CN=x" :public-key (.getPublic kp) :signing-key (.getPrivate kp)}]
+    (check "the probe leaves a stale error" (push-stale-error!))
+    (let [m (error-message #(x509/certificate (assoc base :subject "C=USA")))]
+      (check (str "a native failure reports its own reason, not a stale one: " m)
+             (and (str/includes? m "C=USA") (str/includes? m "string too long"))))
+    (check "a failure leaves the queue empty" (zero? (t-err-peek)))
+    (push-stale-error!)
+    (x509/certificate base)
+    (check "a success leaves the queue empty" (zero? (t-err-peek)))))
 
 (defn- test-pem []
   (let [{:keys [certificate private-key]} (x509/generate {:subject "CN=pem"})
@@ -352,5 +406,6 @@
   (test-ca-and-leaf)
   (test-names)
   (test-validation)
+  (test-error-queue)
   (test-pem)
   @failures)

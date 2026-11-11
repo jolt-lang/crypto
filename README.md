@@ -119,7 +119,7 @@ key (PKCS#8) or a public key (SubjectPublicKeyInfo) as PEM text.
 | `:key-usage` | `#{:digital-signature :non-repudiation :key-encipherment :data-encipherment :key-agreement :key-cert-sign :crl-sign :encipher-only :decipher-only}`, marked critical |
 | `:extended-key-usage` | `#{:server-auth :client-auth :code-signing :email-protection :time-stamping :ocsp-signing}` |
 | `:key-type` | `generate` only: `:ec` (P-256, the default), `:rsa` (2048 bits) or `:ed25519` |
-| `:key-size` | `generate` only: RSA modulus bits, or 256, 384 or 521 to pick the EC curve |
+| `:key-size` | `generate` only: RSA modulus bits, or 256, 384 or 521 to pick the EC curve. Not for `:ed25519`, which has one size |
 
 Every certificate is version 3, and the signing key decides the signature
 algorithm: `SHA256withRSA`, `SHA256withECDSA` or `Ed25519`. Each one carries a
@@ -131,6 +131,15 @@ both accept those defaults for a localhost server. Bad input throws an
 `ex-info` that names the problem, whether it is a misspelt option, an unknown
 SAN kind, an address that does not parse, a malformed name, or a signing key
 that belongs to neither the issuer nor, when self-signed, `:public-key`.
+A CA whose `:key-usage` leaves out `:key-cert-sign` is refused too, since it
+could not issue anything.
+
+Some things are deliberately left out. Names take the `X500Principal` text
+form with `\,` and `\XX` escapes (the bytes must be UTF-8) and an `OID.`
+prefix, but not quoted values, multi-valued RDNs (`CN=a+O=b`) or the `#hex`
+BER form. An EC key signs with SHA-256 whatever its curve. There is no
+pathLenConstraint, and an issued certificate's validity is not checked against
+its CA's, so a leaf can outlive the CA that signed it.
 
 ## OpenSSL
 

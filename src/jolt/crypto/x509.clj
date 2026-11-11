@@ -83,7 +83,9 @@
 
 (defn- openssl-reason
   "The oldest error on this thread's OpenSSL queue as text, and the queue
-  cleared; nil when it was empty."
+  cleared; nil when it was empty. certificate clears the queue before its first
+  native call, so the oldest entry is the root cause of this call's failure
+  rather than something an earlier caller left behind."
   []
   (let [e (c-err-get)]
     (try
@@ -109,7 +111,10 @@
            (swap! owned conj [ptr free])
            ptr))
       (finally
-        (doseq [[ptr free] @owned] (free ptr))))))
+        (doseq [[ptr free] @owned] (free ptr))
+        ;; a failure path has already reported what it found; a success
+        ;; path must not leave anything behind either
+        (c-err-clear)))))
 
 (defn- d2i
   "Decode DER with a d2i_* parser into an owned object."
@@ -156,15 +161,22 @@
             (= sep (nth s i)) (recur (inc i) (inc i) (conj acc (subs s start i)))
             :else (recur (inc i) start acc)))))
 
+(defn- escaped-at?
+  "Whether the character at index i of s is escaped: an odd run of backslashes
+  right before it."
+  [s i]
+  (odd? (count (take-while #(= \\ %) (map #(nth s %) (range (dec i) -1 -1))))))
+
 (defn- trim-value
-  "Drop leading spaces and trailing unescaped ones."
+  "Drop leading spaces and trailing unescaped ones. Spaces only, as RFC 4514
+  and X500Principal trim: a tab or newline is part of the value."
   [s]
-  (let [s (str/triml s)]
+  (let [s (subs s (count (take-while #(= \space %) s)))]
     (loop [s s]
-      (if (and (str/ends-with? s " ")
-               (not (str/ends-with? s "\\ ")))
-        (recur (subs s 0 (dec (count s))))
-        s))))
+      (let [i (dec (count s))]
+        (if (and (>= i 0) (= \space (nth s i)) (not (escaped-at? s i)))
+          (recur (subs s 0 i))
+          s)))))
 
 (defn- unescape-value
   "An RFC 2253 attribute value with its escapes resolved: \\, and the other
@@ -172,9 +184,19 @@
   [dn raw]
   (let [n (count raw)
         utf8 (fn [c] (seq (.getBytes (str c) "UTF-8")))]
+    (when (and (pos? n) (= \# (nth raw 0)))
+      ;; RFC 4514 #hexstring is a BER-encoded value, which X500Principal
+      ;; decodes. Storing it as the literal text would be silently wrong.
+      (fail (str "#hex BER values are not supported in " (pr-str dn)
+                 " (write the value as text, or escape a literal # as \\#)") {:subject dn}))
     (loop [i 0 out []]
       (if (>= i n)
-        (String. (byte-array out) "UTF-8")
+        (let [bs (byte-array out) v (String. bs "UTF-8")]
+          ;; \XX escapes can spell bytes that are not UTF-8, which would
+          ;; decode to replacement characters (X500Principal keeps U+FFFD)
+          (when-not (= (seq bs) (seq (.getBytes v "UTF-8")))
+            (fail (str "the \\XX escapes in " (pr-str dn) " are not valid UTF-8") {:subject dn}))
+          v)
         (let [c (nth raw i)]
           (cond
             (not= \\ c)
@@ -211,8 +233,9 @@
                 k (str/trim (or k ""))]
             (when (< (count parts) 2)
               (fail (str ":subject component " (pr-str (str/trim rdn)) " is not ATTRIBUTE=value") {:subject dn}))
-            (let [field (or (dn-attributes (str/upper-case k))
-                            (when (re-matches #"[0-9]+(\.[0-9]+)+" k) k)
+            (let [oid (if (re-matches #"(?i)oid\..*" k) (subs k 4) k)
+                  field (or (dn-attributes (str/upper-case k))
+                            (when (re-matches #"[0-9]+(\.[0-9]+)+" oid) oid)
                             (fail (str ":subject attribute " (pr-str k) " is unknown (use one of "
                                        (str/join ", " (sort (keys dn-attributes))) " or a dotted OID)")
                                   {:subject dn :attribute k}))
@@ -255,7 +278,7 @@
 (defn- usage-conf
   "The extension config string for a set of usage keywords, or nil when empty."
   [opt table usages]
-  (when (and (some? usages) (not (coll? usages)))
+  (when (and (some? usages) (not (or (set? usages) (sequential? usages))))
     (fail (str opt " must be a set of keywords, got " (pr-str usages)) {opt usages}))
   (when (seq usages)
     (str/join "," (for [u (sort-by str usages)]
@@ -268,9 +291,18 @@
 ;; would end an entry in OpenSSL's config syntax (comma, colon, space) gets past.
 (def ^:private dns-name-re #"(\*\.)?[A-Za-z0-9_]([A-Za-z0-9_-]*[A-Za-z0-9_])?(\.[A-Za-z0-9_]([A-Za-z0-9_-]*[A-Za-z0-9_])?)*\.?")
 
+;; a2i_IPADDRESS is the parser OpenSSL builds the SAN with, but older releases
+;; read IPv4 with sscanf("%d.%d.%d.%d"), which takes "+1.2.3.4" and ignores
+;; anything after the fourth octet. So the text must be an address on its own
+;; first: four 0-255 octets without leading zeros, or IPv6 hex groups (whose
+;; tail may be such an IPv4 address). 3.5.9 refuses all of these itself.
+(def ^:private ipv4-octet "(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])")
+(def ^:private ipv4-re (re-pattern (str ipv4-octet "(\\." ipv4-octet "){3}")))
+(def ^:private ipv6-re (re-pattern (str "[0-9A-Fa-f:]*:[0-9A-Fa-f:]*(" ipv4-octet "(\\." ipv4-octet "){3})?")))
+
 (defn- valid-ip? [s]
-  (let [o (c-a2i-ipaddress s)]
-    (if (ffi/null? o)
+  (let [o (when (or (re-matches ipv4-re s) (re-matches ipv6-re s)) (c-a2i-ipaddress s))]
+    (if (or (nil? o) (ffi/null? o))
       (do (c-err-clear) false)
       (do (c-octet-free o) true))))
 
@@ -422,6 +454,7 @@
   naming what is wrong."
   [opts]
   (check-options opts certificate-options "certificate")
+  (c-err-clear)
   (let [{:keys [subject public-key signing-key issuer san ca? key-usage extended-key-usage serial]} opts
         _ (parse-dn subject)
         pub-der (key-der :public-key public-key :jolt.crypto/public-key)
@@ -433,6 +466,9 @@
         serial (serial-hex serial)
         san (san-conf san)
         ku (usage-conf :key-usage key-usages (if (and ca? (nil? key-usage)) ca-key-usage key-usage))
+        _ (when (and ca? (some? key-usage) (not (some #{:key-cert-sign} key-usage)))
+            (fail ":ca? true needs :key-cert-sign in :key-usage, or a CA cannot issue certificates"
+                  {:key-usage key-usage}))
         eku (usage-conf :extended-key-usage extended-key-usages extended-key-usage)
         der (with-owner
               (fn [own]
@@ -495,6 +531,8 @@
         algo (case key-type :ec "EC" :rsa "RSA" :ed25519 "Ed25519"
                    (fail (str "unknown :key-type " (pr-str key-type) " (expected :ec, :rsa or :ed25519)")
                          {:key-type key-type}))
+        _ (when (and (= :ed25519 key-type) (some? key-size))
+            (fail ":key-size does not apply to :ed25519, which has one size" {:key-size key-size}))
         _ (when (and issuer (nil? signing-key))
             (fail "an :issuer needs its :signing-key, the CA's private key" {:option :signing-key}))
         _ (when (and signing-key (nil? issuer))
