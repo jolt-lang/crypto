@@ -2,6 +2,7 @@
   "Drives the shims through the javax.crypto / java.security surface, exactly the
   way ring-core's session-cookie store does."
   (:require [jolt.crypto]
+            [jolt.crypto.x509-test :as x509-test]
             [clojure.edn :as edn]
             [clojure.string :as str]))
 
@@ -275,6 +276,7 @@
   (test-update-snapshots-input)
   (test-offset-length-overloads)
   (test-x509-certificates)
+  (swap! failures + (x509-test/run))
 
   ;; SecureRandom fills a buffer with (probably) non-zero, varying bytes.
   (let [sr (SecureRandom.) a (byte-array 16) b (byte-array 16)]

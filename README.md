@@ -74,6 +74,64 @@ The shims register through Jolt's host-shim hooks (`__register-class-ctor!` /
 and loaded before the namespace; an app that also pulls http-client shares the
 one loaded copy (jolt.deps reconciles natives).
 
+## Making certificates
+
+The JDK has no public API for creating a certificate. A JVM program shells out
+to `keytool` or pulls in Bouncy Castle, so there is no class to imitate here.
+`jolt.crypto.x509` is a small function API instead: an options map goes in, and
+out comes the same `X509Certificate` value `CertificateFactory` returns.
+
+```clojure
+(require '[jolt.crypto.x509 :as x509])
+
+;; a self-signed localhost certificate and its key, for a test or dev TLS server
+(let [{:keys [certificate private-key]}
+      (x509/generate {:subject "CN=localhost"
+                      :san [[:dns "localhost"] [:ip "127.0.0.1"] [:ip "::1"]]})]
+  (spit "cert.pem" (x509/pem certificate))
+  (spit "key.pem" (x509/pem private-key)))   ; PKCS#8 "PRIVATE KEY"
+
+;; a small CA and a client certificate it issues, for mTLS tests
+(let [{ca :certificate ca-key :private-key} (x509/generate {:subject "CN=Test CA" :ca? true})
+      {client :certificate client-key :private-key}
+      (x509/generate {:subject "CN=client"
+                      :issuer ca :signing-key ca-key
+                      :extended-key-usage #{:client-auth}})]
+  ...)
+```
+
+`(x509/certificate opts)` signs a certificate for a public key you already
+have, and `(x509/generate opts)` makes the key pair too, answering
+`{:certificate :private-key}`. `(x509/pem x)` writes a certificate, a private
+key (PKCS#8) or a public key (SubjectPublicKeyInfo) as PEM text.
+
+| Option | Meaning |
+|--------|---------|
+| `:subject` | RFC 2253 name, the `X500Principal` form: `"CN=localhost,O=Example"`. Required |
+| `:public-key` | the subject's `PublicKey`. Required by `certificate`; `generate` makes it |
+| `:signing-key` | the `PrivateKey` that signs: the subject's own when self-signed, the CA's otherwise. `generate` defaults it to the new key when there is no `:issuer` |
+| `:issuer` | the CA's `X509Certificate`. Absent means self-signed |
+| `:san` | `[[:dns "localhost"] [:ip "127.0.0.1"] [:ip "::1"]]`: DNS names, IPv4 and IPv6 addresses |
+| `:days` | validity counted from `:not-before`, default 365 |
+| `:not-before` / `:not-after` | `java.util.Date` or `#inst`. `:not-before` defaults to now, `:not-after` replaces `:days` |
+| `:serial` | a positive integer below 2^159; the default is 159 random bits |
+| `:ca?` | `true` makes a CA: critical `basicConstraints CA:TRUE`, and keyUsage keyCertSign, cRLSign and digitalSignature unless `:key-usage` is given |
+| `:key-usage` | `#{:digital-signature :non-repudiation :key-encipherment :data-encipherment :key-agreement :key-cert-sign :crl-sign :encipher-only :decipher-only}`, marked critical |
+| `:extended-key-usage` | `#{:server-auth :client-auth :code-signing :email-protection :time-stamping :ocsp-signing}` |
+| `:key-type` | `generate` only: `:ec` (P-256, the default), `:rsa` (2048 bits) or `:ed25519` |
+| `:key-size` | `generate` only: RSA modulus bits, or 256, 384 or 521 to pick the EC curve |
+
+Every certificate is version 3, and the signing key decides the signature
+algorithm: `SHA256withRSA`, `SHA256withECDSA` or `Ed25519`. Each one carries a
+subjectKeyIdentifier and a basicConstraints extension (`CA:FALSE` on a leaf).
+An issued certificate also carries the authorityKeyIdentifier that points back
+at its CA. A leaf gets no keyUsage or extendedKeyUsage unless you ask, because
+an absent extension restricts nothing, and the JDK's TLS client and OpenSSL
+both accept those defaults for a localhost server. Bad input throws an
+`ex-info` that names the problem, whether it is a misspelt option, an unknown
+SAN kind, an address that does not parse, a malformed name, or a signing key
+that belongs to neither the issuer nor, when self-signed, `:public-key`.
+
 ## OpenSSL
 
 The library needs OpenSSL 3 at runtime. It is looked for in:
