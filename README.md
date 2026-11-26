@@ -63,6 +63,9 @@ jolt-lang/jolt-crypto {:git/url "https://github.com/jolt-lang/crypto"
                        :git/sha "..."}
 ```
 
+Each release is a git tag. [CHANGELOG.md](CHANGELOG.md) lists what changed in
+each one.
+
 ```clojure
 (require 'jolt.crypto)   ;; installs the host-class shims on load
 ```
