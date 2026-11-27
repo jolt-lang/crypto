@@ -39,6 +39,11 @@
 (ffi/defcfn c-cipher-set-padding "EVP_CIPHER_CTX_set_padding" [:pointer :int] :int)
 (ffi/defcfn c-pkey-new-mac-key "EVP_PKEY_new_mac_key" [:int :pointer :pointer :int] :pointer)
 (ffi/defcfn c-pkey-free "EVP_PKEY_free" [:pointer] :void)
+(ffi/defcfn c-d2i-pubkey "d2i_PUBKEY" [:pointer :pointer :long] :pointer)
+(ffi/defcfn c-d2i-x509 "d2i_X509" [:pointer :pointer :long] :pointer)
+(ffi/defcfn c-x509-free "X509_free" [:pointer] :void)
+(ffi/defcfn c-x509-verify "X509_verify" [:pointer :pointer] :int)
+(ffi/defcfn c-err-clear "ERR_clear_error" [] :void)
 (ffi/defcfn c-md-ctx-new "EVP_MD_CTX_new" [] :pointer)
 (ffi/defcfn c-md-ctx-free "EVP_MD_CTX_free" [:pointer] :void)
 (ffi/defcfn c-poly1305-sign-init "EVP_DigestSignInit" [:pointer :pointer :pointer :pointer :pointer] :int)
@@ -100,6 +105,45 @@
       (finally
         (doseq [ptr @ptrs]
           (ffi/free ptr))))))
+
+(defn- with-der-object [decode-fn free-fn der kind f]
+  (let [der (as-bytes der)
+        length (alength der)
+        buffer (ffi/alloc (max 1 length))]
+    (try
+      (let [holder (ffi/alloc (ffi/sizeof :pointer))]
+        (try
+          (ffi/write-array buffer der)
+          (ffi/write holder :pointer buffer 0)
+          (c-err-clear)
+          (let [object (decode-fn ffi/null holder length)]
+            (when (ffi/null? object)
+              (c-err-clear)
+              (throw (ex-info (str "OpenSSL could not decode " (name kind)) {:kind kind})))
+            (try
+              (f object)
+              (finally
+                (free-fn object))))
+          (finally
+            (ffi/free holder))))
+      (finally
+        (ffi/free buffer)))))
+
+(defn x509-verify
+  "Verify certificate DER against a SubjectPublicKeyInfo DER key."
+  [certificate-der public-key-der]
+  (with-der-object c-d2i-x509 c-x509-free certificate-der :certificate
+    (fn [certificate]
+      (with-der-object c-d2i-pubkey c-pkey-free public-key-der :public-key
+        (fn [public-key]
+          (c-err-clear)
+          (let [result (c-x509-verify certificate public-key)]
+            (c-err-clear)
+            (cond
+              (= 1 result) true
+              (zero? result) false
+              :else (throw (ex-info "OpenSSL X.509 signature verification failed"
+                                    {:result result})))))))))
 
 (defn digest-bytes [algorithm data]
   (let [md (digest-md algorithm)

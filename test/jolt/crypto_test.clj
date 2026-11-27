@@ -14,6 +14,7 @@
             [jolt.crypto.crypto-test]
             [jolt.crypto.keys-test]
             [jolt.crypto.keys-jwk-test]
+            [jolt.crypto.certificates-test]
             [jolt.crypto.dsa-test]
             [jolt.crypto.util.ecdsa-test]
             [jolt.crypto.x509-test :as x509-test]
@@ -762,6 +763,7 @@
                                           'jolt.crypto.crypto-test
                                           'jolt.crypto.keys-test
                                           'jolt.crypto.keys-jwk-test
+                                          'jolt.crypto.certificates-test
                                           'jolt.crypto.dsa-test
                                           'jolt.crypto.util.ecdsa-test)]
     (swap! failures + fail error))

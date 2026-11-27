@@ -27,6 +27,7 @@
   namespace; an app that also pulls http-client shares the one loaded copy."
   (:require [jolt.ffi :as ffi]
             [jolt.crypto.codecs :as codecs]
+            [jolt.crypto.internal.openssl :as openssl]
             [clojure.string :as str]))
 
 ;; --- OpenSSL (libcrypto) bindings -------------------------------------------
@@ -1336,6 +1337,30 @@
 
 ;; --- X.509 shim objects -----------------------------------------------------
 (defn- x509-cert? [x] (and (table? x) (= :jolt.crypto/x509-cert (tget x :jolt/type))))
+(defn- x509-public-key? [x] (and (table? x) (= :jolt.crypto/public-key (tget x :jolt/type))))
+
+(defn certificate-subject
+  "Return an X.509 subject in certificate RDN order, as Buddy's X500Name does."
+  [cert]
+  (when-not (x509-cert? cert)
+    (throw (ex-info "Unknown certificate type" {:kind (class cert)})))
+  (str/join "," (reverse (split-rdns (tget cert :subject)))))
+
+(defn verify-certificate-signature
+  "Verify a parsed X.509 value with a tagged public key or issuer certificate."
+  [cert public-key]
+  (when-not (x509-cert? cert)
+    (throw (ex-info "Unknown certificate type" {:kind (class cert)})))
+  (cond
+    (x509-public-key? public-key)
+    (openssl/x509-verify (tget cert :der) (tget public-key :bytes))
+
+    (x509-cert? public-key)
+    (openssl/x509-verify (tget cert :der) (:der (tget public-key :public-key)))
+
+    :else
+    (throw (ex-info "Unknown public key type" {:kind (class public-key)}))))
+
 (defn- x500-principal? [x] (and (table? x) (= :jolt.crypto/x500-principal (tget x :jolt/type))))
 (defn- x500-name? [x] (and (table? x) (= :jolt.crypto/x500-name (tget x :jolt/type))))
 (defn- ba= [a b] (and (bytes? a) (bytes? b) (= (seq a) (seq b))))
