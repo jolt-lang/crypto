@@ -231,12 +231,12 @@
             named (assoc generic :alg (keyword (str "pbkdf2+" suffix)))]
         (is (bytes/equals? (derive-bytes generic 24) (derive-bytes named 24)))))))
 
-(deftest sha386-compatibility-shorthands-fail-explicitly-test
+(deftest sha386-compatibility-shorthands-mean-sha384-test
   (doseq [algorithm [:hkdf :kdf1 :kdf2 :cmkdf :fmkdf :dpimkdf]]
     (testing (str algorithm "+sha386")
-      (is (= :sha386 (:algorithm (exception-data
-                                  #(kdf/engine {:key "key" :salt "salt"
-                                                :alg (keyword (str (name algorithm) "+sha386"))}))))))))
+      (let [generic {:key "key" :salt "salt" :info "info" :alg algorithm :digest :sha384}
+            misspelled (assoc generic :alg (keyword (str (name algorithm) "+sha386")))]
+        (is (bytes/equals? (derive-bytes generic 24) (derive-bytes misspelled 24)))))))
 
 (deftest byte-buffer-contains-derived-bytes-test
   (let [engine (kdf/engine {:key "key" :salt "salt" :info "info" :alg :hkdf+sha256})

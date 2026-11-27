@@ -196,3 +196,11 @@
         (is (= (codecs/bytes->hex (mac/hash data {:key secret :alg alg}))
                (codecs/bytes->hex (mac/hash (java.io.ByteArrayInputStream. data)
                                             {:key secret :alg alg}))))))))
+
+(deftest stream-poly1305-matches-one-shot
+  (let [data (byte-array (map unchecked-byte (range (* 3 1024 1024))))
+        options {:key poly-key :iv poly-iv :alg :poly1305+aes}]
+    (is (= (codecs/bytes->hex (mac/hash data options))
+           (codecs/bytes->hex (mac/hash (java.io.ByteArrayInputStream. data) options))))
+    (is (= (codecs/bytes->hex (openssl/poly1305-aes-bytes poly-key poly-iv data))
+           (codecs/bytes->hex (mac/hash data options))))))

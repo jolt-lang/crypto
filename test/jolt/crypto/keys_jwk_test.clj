@@ -18,6 +18,7 @@
 
 (ns jolt.crypto.keys-jwk-test
   (:require [clojure.test :refer :all]
+            [jolt.crypto :as jcrypto]
             [jolt.crypto.bytes :as bytes]
             [jolt.crypto.codecs :as codecs]
             [jolt.crypto.dsa :as dsa]
@@ -430,3 +431,12 @@
              clojure.lang.ExceptionInfo
              #"Invalid EC coordinate width"
              (keys/jwk->private-key (assoc padded-jwk :d overlong))))))))
+
+(deftest rsa-pem-key-writes-crt-fields
+  (let [private (keys/private-key (fixture "privkey.rsa.pem"))
+        {:keys [n e]} (jcrypto/rsa-private-parameters private)
+        public (jcrypto/rsa-public-from-parameters n e)
+        jwk (keys/jwk private public)]
+    (doseq [field [:n :e :d :p :q :dp :dq :qi]]
+      (is (string? (get jwk field)) (str field)))
+    (is (= jwk (keys/jwk (keys/jwk->private-key jwk) public)))))

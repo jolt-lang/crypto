@@ -132,8 +132,9 @@
                 (supplied-crt-parameters n e d jwk)
                 (crt-parameters n e d))
           key (crypto/rsa-private-from-parameters (native-parameters jwk crt))]
-      (when direct?
-        (jolt.host/ref-put! key :jwk-crt? true))
+      ;; Remember an n/e/d-only JWK so jwk writes it back the same way.
+      (when-not direct?
+        (jolt.host/ref-put! key :jwk-ned-only? true))
       key)))
 
 (defmethod proto/jwk->public-key "RSA"
@@ -173,7 +174,8 @@
                       {:expected (codecs/bytes->hex private-n)
                        :actual (:n public-jwk)})))
     (let [base-jwk (assoc public-jwk :d (proto/bigint->b64str (proto/calc-byte-length d) d))]
-      (if (jolt.host/ref-get private :jwk-crt?)
+      (if (and (not (jolt.host/ref-get private :jwk-ned-only?))
+               (every? #(some? (get private-parameters %)) crt-fields))
         (reduce (fn [result field]
                   (let [value (proto/b64str->bigint
                                (proto/bytes->b64str (get private-parameters field)))]

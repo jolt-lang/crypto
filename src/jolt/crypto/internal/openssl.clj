@@ -56,6 +56,8 @@
 (ffi/defcfn c-hmac-init "HMAC_Init_ex" [:pointer :pointer :int :pointer :pointer] :int)
 (ffi/defcfn c-hmac-update "HMAC_Update" [:pointer :pointer :size_t] :int)
 (ffi/defcfn c-hmac-final "HMAC_Final" [:pointer :pointer :pointer] :int)
+(ffi/defcfn c-sign-update "EVP_DigestSignUpdate" [:pointer :pointer :size_t] :int)
+(ffi/defcfn c-sign-final "EVP_DigestSignFinal" [:pointer :pointer :pointer] :int)
 (ffi/defcfn c-poly1305-sign-init "EVP_DigestSignInit" [:pointer :pointer :pointer :pointer :pointer] :int)
 (ffi/defcfn c-poly1305-sign "EVP_DigestSign" [:pointer :pointer :pointer :pointer :size_t] :int)
 
@@ -534,10 +536,12 @@
           (finally
             (c-pkey-free pkey)))))))
 
-(defn poly1305-aes-bytes [key iv data]
+(defn- poly1305-aes-key
+  "The one-time Poly1305 key for Poly1305-AES: r clamped, then
+  AES-128(k, nonce) as s."
+  [key iv]
   (let [key (as-bytes key)
-        iv (as-bytes iv)
-        data (as-bytes data)]
+        iv (as-bytes iv)]
     (when-not (= 32 (alength key))
       (throw (ex-info "Poly1305 key must be 32 bytes" {:key-length (alength key)})))
     (when-not (= 16 (alength iv))
@@ -547,8 +551,17 @@
         (aset-byte r index (unchecked-byte (bit-and (aget r index) 15))))
       (doseq [index [4 8 12]]
         (aset-byte r index (unchecked-byte (bit-and (aget r index) 252))))
-      (let [pad (aes-128-ecb-block (bytes/slice key 16 32) iv)]
-        (poly1305-bytes (bytes/concat r pad) data)))))
+      (bytes/concat r (aes-128-ecb-block (bytes/slice key 16 32) iv)))))
+
+(defn poly1305-aes-bytes [key iv data]
+  (let [key (as-bytes key)
+        iv (as-bytes iv)
+        data (as-bytes data)]
+    (when-not (= 32 (alength key))
+      (throw (ex-info "Poly1305 key must be 32 bytes" {:key-length (alength key)})))
+    (when-not (= 16 (alength iv))
+      (throw (ex-info "Poly1305 IV must be 16 bytes" {:iv-length (alength iv)})))
+    (poly1305-bytes (poly1305-aes-key key iv) data)))
 
 ;; Incremental digest and HMAC contexts, for engines that stream: each update
 ;; goes straight into OpenSSL, so hashing a large file runs in constant memory.
@@ -628,3 +641,51 @@
 
 (defn free-hmac-context! [ctx]
   (c-hmac-ctx-free ctx))
+
+(defn poly1305-aes-context
+  "A new incremental Poly1305-AES context: {:ctx :pkey}, native memory that
+  poly1305-finish! or free-poly1305-context! releases."
+  [key iv]
+  (let [one-time-key (poly1305-aes-key key iv)
+        pkey (with-byte-ptrs [one-time-key]
+               (fn [key-ptr]
+                 (c-pkey-new-mac-key evp-pkey-poly1305 ffi/null key-ptr 32)))]
+    (when (ffi/null? pkey)
+      (throw (ex-info "OpenSSL Poly1305 key initialization failed" {})))
+    (let [ctx (c-md-ctx-new)]
+      (when (ffi/null? ctx)
+        (c-pkey-free pkey)
+        (throw (ex-info "OpenSSL Poly1305 context allocation failed" {})))
+      (when-not (= 1 (c-poly1305-sign-init ctx ffi/null ffi/null ffi/null pkey))
+        (c-md-ctx-free ctx)
+        (c-pkey-free pkey)
+        (throw (ex-info "OpenSSL Poly1305 initialization failed" {})))
+      {:ctx ctx :pkey pkey})))
+
+(defn free-poly1305-context! [{:keys [ctx pkey]}]
+  (c-md-ctx-free ctx)
+  (c-pkey-free pkey))
+
+(defn poly1305-update! [{:keys [ctx]} data]
+  (feed! c-sign-update ctx (as-bytes data) "Poly1305" :poly1305))
+
+(defn poly1305-finish!
+  "Finalize the context, free it and return the 16-byte tag."
+  [context]
+  (try
+    (let [output (ffi/alloc 16)
+          output-length (ffi/alloc 8)]
+      (try
+        (ffi/write output-length :size_t 16 0)
+        (when-not (= 1 (c-sign-final (:ctx context) output output-length))
+          (throw (ex-info "OpenSSL Poly1305 signing failed" {})))
+        (let [actual-length (ffi/read output-length :size_t)]
+          (when-not (= 16 actual-length)
+            (throw (ex-info "OpenSSL Poly1305 returned an unexpected tag length"
+                            {:expected 16 :actual actual-length})))
+          (ffi/read-array output actual-length))
+        (finally
+          (ffi/free output-length)
+          (ffi/free output))))
+    (finally
+      (free-poly1305-context! context))))
