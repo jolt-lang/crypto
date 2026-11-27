@@ -272,6 +272,11 @@
 
 (defn -main [& _]
   (test-native-declarations)
+  (doseq [[canonical alias] [["MD5" "md5"] ["SHA-512" "sha-512"] ["SHA-256" "sHa256"]]]
+    (let [input (.getBytes "abc")]
+      (check (str "case-insensitive MessageDigest " alias)
+             (= (hex (.digest (MessageDigest/getInstance canonical) input))
+                (hex (.digest (MessageDigest/getInstance alias) input))))))
   (test-large-input-digest)
   (test-update-snapshots-input)
   (test-offset-length-overloads)
