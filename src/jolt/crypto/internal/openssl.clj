@@ -172,7 +172,7 @@
         input-length (alength input)
         secret-length (alength secret)
         wrapping? (= :wrap op)
-        minimum 16
+        minimum (if wrapping? 16 24)
         output-length (if wrapping? (+ input-length 8) (- input-length 8))]
     (when-not (#{16 24 32} secret-length)
       (throw (ex-info "AES key-wrap KEK must be 16, 24, or 32 bytes"

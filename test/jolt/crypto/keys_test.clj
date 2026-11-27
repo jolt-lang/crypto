@@ -204,6 +204,20 @@
       (is (= (+ key-size 8) (alength wrapped)))
       (is (bytes/equals? key (keys/unwrap wrapped secret))))))
 
+(deftest aes-unwrap-validates-the-wrapped-boundary-before-native-call
+  (let [secret (nonce/random-bytes 16)
+        failure (try
+                  (keys/unwrap (byte-array 16) secret)
+                  nil
+                  (catch clojure.lang.ExceptionInfo e
+                    (ex-data e)))]
+    (is (= {:input-length 16 :op :unwrap} failure)))
+  (let [secret (nonce/random-bytes 16)
+        key (nonce/random-bytes 16)
+        wrapped (keys/wrap key secret)]
+    (is (= 24 (alength wrapped)))
+    (is (bytes/equals? key (keys/unwrap wrapped secret)))))
+
 (deftest aes-key-wrap-rejects-invalid-inputs
   (let [secret (nonce/random-bytes 16)
         key (nonce/random-bytes 32)
