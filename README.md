@@ -436,7 +436,9 @@ jolt run metrics-gate   # run the same check CI runs
 ```
 
 `ci/metrics-allow.edn` lists what the check lets through, each entry with a
-`:why`. Five functions and `src/jolt/crypto.clj` itself were already critical
-when the check was added. Their entries record the values they had at v0.4.1,
-so each one fails if it gets worse, and the check asks for the entry to go once
-it's refactored.
+`:why`. A critical entry records the value of every rule its finding breaks, so
+it fails if any gets worse, and the check asks for the entry to go once the
+finding drops below the limits. The one there now is `src/jolt/crypto.clj`'s
+hotspot risk: as the most complex file, its risk tracks how often it changed in
+the last 90 days, which no refactor holds down. That entry stays even while the
+risk is low, and every other rule still applies to the file.

@@ -313,6 +313,74 @@
             (finally
               (ffi/free output-length))))))))
 
+(defn- check-aes-inputs! [mode key-length iv]
+  (let [iv-length (count iv)]
+    (when-not (#{16 24 32} key-length)
+      (throw (ex-info "AES key must be 16, 24, or 32 bytes"
+                      {:key-length key-length})))
+    (when (and (= :ecb mode) (some? iv))
+      (throw (ex-info "ECB mode does not use an IV" {:mode :ecb})))
+    (when (and (not= :ecb mode) (not= :gcm mode) (not= 16 iv-length))
+      (throw (ex-info "AES IV must be 16 bytes" {:iv-length iv-length})))
+    (when (and (= :gcm mode) (not (pos? iv-length)))
+      (throw (ex-info "AES-GCM IV must not be empty" {:iv-length iv-length})))))
+
+(defn- check-chacha-inputs! [key-length iv]
+  (when (not= 32 key-length)
+    (throw (ex-info "ChaCha key must be 32 bytes" {:key-length key-length})))
+  (when (not= 8 (count iv))
+    (throw (ex-info "ChaCha nonce must be 8 bytes" {:iv-length (count iv)}))))
+
+(defn- cipher-spec
+  "Check the key and IV against algorithm and mode, and answer the EVP_CIPHER
+  getter and the IV OpenSSL takes: ChaCha20's is the 8-byte nonce after an
+  8-byte zero counter."
+  [algorithm mode key iv]
+  (let [key-length (alength key)]
+    (case algorithm
+      :aes (do
+             (check-aes-inputs! mode key-length iv)
+             {:cipher-fn (or (get-in aes-ciphers [mode key-length])
+                             (throw (ex-info (str "Unsupported AES mode: " mode)
+                                             {:algorithm algorithm :mode mode})))
+              :native-iv iv})
+      :chacha (do
+                (check-chacha-inputs! key-length iv)
+                {:cipher-fn c-chacha20
+                 :native-iv (bytes/concat (byte-array 8) iv)})
+      (throw (ex-info (str "Unsupported cipher algorithm: " algorithm)
+                      {:algorithm algorithm})))))
+
+(defn- init-gcm!
+  "Initialize ctx for GCM: the cipher, then the IV length, then key and IV."
+  [ctx {:keys [algorithm mode op init cipher-fn iv-length]} key-ptr iv-ptr]
+  (when-not (= 1 (init ctx (cipher-fn) ffi/null ffi/null ffi/null))
+    (throw (ex-info "OpenSSL GCM cipher initialization failed"
+                    {:algorithm algorithm :mode mode :op op})))
+  (when-not (= 1 (c-cipher-ctrl ctx evp-ctrl-aead-set-ivlen iv-length ffi/null))
+    (throw (ex-info "OpenSSL GCM IV length configuration failed"
+                    {:iv-length iv-length})))
+  (when-not (= 1 (init ctx ffi/null ffi/null key-ptr iv-ptr))
+    (throw (ex-info "OpenSSL GCM key initialization failed"
+                    {:algorithm algorithm :mode mode :op op}))))
+
+(defn- init-unpadded!
+  "Initialize ctx for a non-AEAD mode, with EVP's padding turned off."
+  [ctx {:keys [algorithm mode op init cipher-fn]} key-ptr iv-ptr]
+  (when-not (= 1 (init ctx (cipher-fn) ffi/null key-ptr iv-ptr))
+    (throw (ex-info "OpenSSL cipher initialization failed"
+                    {:algorithm algorithm :mode mode :op op})))
+  (when-not (= 1 (c-cipher-set-padding ctx 0))
+    (throw (ex-info "OpenSSL cipher padding configuration failed"
+                    {:algorithm algorithm :mode mode}))))
+
+(defn- new-cipher-ctx [algorithm mode]
+  (let [ctx (c-cipher-ctx-new)]
+    (when (ffi/null? ctx)
+      (throw (ex-info "OpenSSL cipher context allocation failed"
+                      {:algorithm algorithm :mode mode})))
+    ctx))
+
 (defn cipher-context
   "Create an initialized, unpadding EVP context for a Buddy low-level engine."
   ([algorithm mode op key iv]
@@ -321,68 +389,23 @@
    (let [key (as-bytes key)
          iv (when (some? iv) (as-bytes iv))
          mode (if (= :sic mode) :ctr mode)
-         key-length (alength key)
-         iv-length (count iv)]
-     (when (and (= :chacha algorithm) (not= 32 key-length))
-       (throw (ex-info "ChaCha key must be 32 bytes" {:key-length key-length})))
-     (when (= :aes algorithm)
-       (when-not (#{16 24 32} key-length)
-         (throw (ex-info "AES key must be 16, 24, or 32 bytes"
-                         {:key-length key-length})))
-       (when (and (= :ecb mode) (some? iv))
-         (throw (ex-info "ECB mode does not use an IV" {:mode :ecb})))
-       (when (and (not= :ecb mode) (not= :gcm mode) (not= 16 iv-length))
-         (throw (ex-info "AES IV must be 16 bytes" {:iv-length iv-length})))
-       (when (and (= :gcm mode) (not (pos? iv-length)))
-         (throw (ex-info "AES-GCM IV must not be empty" {:iv-length iv-length}))))
-     (when (and (= :chacha algorithm) (not= 8 iv-length))
-       (throw (ex-info "ChaCha nonce must be 8 bytes" {:iv-length iv-length})))
-     (let [cipher-fn (case algorithm
-                       :aes (or (get-in aes-ciphers [mode key-length])
-                                (throw (ex-info (str "Unsupported AES mode: " mode)
-                                                {:algorithm algorithm :mode mode})))
-                       :chacha c-chacha20
-                       (throw (ex-info (str "Unsupported cipher algorithm: " algorithm)
-                                       {:algorithm algorithm})))
-           native-iv (if (= :chacha algorithm)
-                       (bytes/concat (byte-array 8) iv)
-                       iv)
-           inputs (if native-iv [key native-iv] [key])
-           [init _ _] (cipher-operations op)
-           ctx (c-cipher-ctx-new)]
-       (when (ffi/null? ctx)
-         (throw (ex-info "OpenSSL cipher context allocation failed"
-                         {:algorithm algorithm :mode mode})))
-       (try
-         (with-byte-ptrs inputs
-           (fn [& ptrs]
-             (let [key-ptr (first ptrs)
-                   iv-ptr (or (second ptrs) ffi/null)]
-               (if (= :gcm mode)
-                 (do
-                   (when-not (= 1 (init ctx (cipher-fn) ffi/null ffi/null ffi/null))
-                     (throw (ex-info "OpenSSL GCM cipher initialization failed"
-                                     {:algorithm algorithm :mode mode :op op})))
-                   (when-not (= 1 (c-cipher-ctrl ctx evp-ctrl-aead-set-ivlen
-                                                 iv-length ffi/null))
-                     (throw (ex-info "OpenSSL GCM IV length configuration failed"
-                                     {:iv-length iv-length})))
-                   (when-not (= 1 (init ctx ffi/null ffi/null key-ptr iv-ptr))
-                     (throw (ex-info "OpenSSL GCM key initialization failed"
-                                     {:algorithm algorithm :mode mode :op op}))))
-                 (do
-                   (when-not (= 1 (init ctx (cipher-fn) ffi/null key-ptr iv-ptr))
-                     (throw (ex-info "OpenSSL cipher initialization failed"
-                                     {:algorithm algorithm :mode mode :op op})))
-                   (when-not (= 1 (c-cipher-set-padding ctx 0))
-                     (throw (ex-info "OpenSSL cipher padding configuration failed"
-                                     {:algorithm algorithm :mode mode}))))))))
-         (when (= :gcm mode)
-           (cipher-aad! ctx op (or aad (byte-array 0))))
-         ctx
-         (catch Exception e
-           (c-cipher-ctx-free ctx)
-           (throw e)))))))
+         {:keys [native-iv] :as spec} (cipher-spec algorithm mode key iv)
+         [init _ _] (cipher-operations op)
+         spec (assoc spec :algorithm algorithm :mode mode :op op :init init
+                     :iv-length (count iv))
+         ctx (new-cipher-ctx algorithm mode)]
+     (try
+       (with-byte-ptrs (if native-iv [key native-iv] [key])
+         (fn [key-ptr & [iv-ptr]]
+           (if (= :gcm mode)
+             (init-gcm! ctx spec key-ptr (or iv-ptr ffi/null))
+             (init-unpadded! ctx spec key-ptr (or iv-ptr ffi/null)))))
+       (when (= :gcm mode)
+         (cipher-aad! ctx op (or aad (byte-array 0))))
+       ctx
+       (catch Exception e
+         (c-cipher-ctx-free ctx)
+         (throw e))))))
 
 (defn free-cipher-context!
   "Detach and release an engine's native context, if present."

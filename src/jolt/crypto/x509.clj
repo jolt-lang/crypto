@@ -424,6 +424,94 @@
   (when (ffi/null? (c-asn1-time-set (getm x) secs))
     (native-fail (str "setting " label) {})))
 
+(defn- check-issuer-option [issuer]
+  (when (and (some? issuer) (not (instance? X509Certificate issuer)))
+    (fail (str ":issuer must be an X509Certificate, got " (pr-str issuer)) {:option :issuer})))
+
+(defn- key-usage-conf
+  "keyUsage's config string: :key-usage, or a CA's default when :ca? has none."
+  [{:keys [ca? key-usage]}]
+  (let [ku (usage-conf :key-usage key-usages (if (and ca? (nil? key-usage)) ca-key-usage key-usage))]
+    (when (and ca? (some? key-usage) (not (some #{:key-cert-sign} key-usage)))
+      (fail ":ca? true needs :key-cert-sign in :key-usage, or a CA cannot issue certificates"
+            {:key-usage key-usage}))
+    ku))
+
+(defn- certificate-spec
+  "Check certificate's options and work out everything it builds from them,
+  before any native object exists."
+  [opts]
+  (check-options opts certificate-options "certificate")
+  (let [{:keys [subject public-key signing-key issuer san ca? extended-key-usage serial]} opts
+        _ (parse-dn subject)
+        pub-der (key-der :public-key public-key :jolt.crypto/public-key)
+        priv-der (key-der :signing-key signing-key :jolt.crypto/private-key)
+        md (signing-digest (.getAlgorithm signing-key))
+        _ (check-issuer-option issuer)
+        [not-before not-after] (validity opts)
+        serial (serial-hex serial)
+        san (san-conf san)
+        ku (key-usage-conf opts)
+        eku (usage-conf :extended-key-usage extended-key-usages extended-key-usage)]
+    {:subject subject :issuer issuer :ca? ca? :pub-der pub-der :priv-der priv-der :md md
+     :not-before not-before :not-after not-after :serial serial
+     :san san :key-usage ku :extended-key-usage eku}))
+
+(defn- check-issuer!
+  "Refuse an issuer that is not a CA, or whose key the signing key does not match."
+  [issuer issuer-x priv]
+  (when (zero? (c-check-ca issuer-x))
+    (c-err-clear)
+    (fail (str ":issuer " (.getName (.getSubjectX500Principal issuer))
+               " is not a CA (it needs basicConstraints CA:TRUE)") {:option :issuer}))
+  (when (not= 1 (c-check-private-key issuer-x priv))
+    (c-err-clear)
+    (fail ":signing-key does not match the :issuer certificate's public key"
+          {:option :signing-key})))
+
+(defn- decode-natives
+  "The native keys, issuer certificate, new X509 and subject name the
+  certificate is built from, each freed by `own`."
+  [own {:keys [pub-der priv-der issuer subject]}]
+  (let [pub (d2i own c-d2i-pubkey c-pkey-free pub-der "decoding :public-key")
+        priv (d2i own c-d2i-privkey c-pkey-free priv-der "decoding :signing-key")
+        issuer-x (when issuer
+                   (d2i own c-d2i-x509 c-x509-free (.getEncoded issuer) "decoding :issuer"))
+        x (own (c-x509-new) c-x509-free "X509_new")
+        subject-name (build-name own subject)]
+    (when issuer-x
+      (check-issuer! issuer issuer-x priv))
+    {:pub pub :priv priv :issuer-x issuer-x :x x :subject-name subject-name}))
+
+(defn- set-fields!
+  "Version, serial, validity, names and public key."
+  [own {:keys [pub priv issuer-x x subject-name]} {:keys [serial not-before not-after]}]
+  (when (not= 1 (c-x509-set-version x x509-version-3)) (native-fail "X509_set_version" {}))
+  (set-serial! own x serial)
+  (set-time! c-getm-not-before x not-before "notBefore")
+  (set-time! c-getm-not-after x not-after "notAfter")
+  (when (not= 1 (c-x509-set-subject x subject-name)) (native-fail "setting the subject" {}))
+  (when (not= 1 (c-x509-set-issuer x (if issuer-x (c-x509-get-subject issuer-x) subject-name)))
+    (native-fail "setting the issuer" {}))
+  (when (not= 1 (c-x509-set-pubkey x pub)) (native-fail "setting the public key" {}))
+  (when (and (nil? issuer-x) (not= 1 (c-check-private-key x priv)))
+    (c-err-clear)
+    (fail ":signing-key does not match :public-key, and a certificate without :issuer is self-signed"
+          {:option :signing-key})))
+
+(defn- add-extensions!
+  "basicConstraints, the key usages and SAN asked for, and the key identifiers."
+  [own {:keys [issuer-x x]} {:keys [ca? key-usage extended-key-usage san]}]
+  (let [ctx (own (ffi/alloc v3-ctx-size) ffi/free "alloc")]
+    (c-v3-set-ctx ctx (or issuer-x x) x ffi/null ffi/null 0)
+    (add-ext! own x ctx nid-basic-constraints (if ca? "critical,CA:TRUE" "CA:FALSE") "basicConstraints")
+    (when key-usage (add-ext! own x ctx nid-key-usage (str "critical," key-usage) "keyUsage"))
+    (when extended-key-usage (add-ext! own x ctx nid-ext-key-usage extended-key-usage "extendedKeyUsage"))
+    (when san (add-ext! own x ctx nid-subject-alt-name san "subjectAltName"))
+    (add-ext! own x ctx nid-subject-key-identifier "hash" "subjectKeyIdentifier")
+    (when issuer-x
+      (add-ext! own x ctx nid-authority-key-identifier "keyid,issuer" "authorityKeyIdentifier"))))
+
 (defn certificate
   "Build and sign an X.509 v3 certificate; answers the same X509Certificate
   value CertificateFactory/generateCertificate returns.
@@ -453,63 +541,16 @@
   every certificate carries subjectKeyIdentifier. Bad options throw ex-info
   naming what is wrong."
   [opts]
-  (check-options opts certificate-options "certificate")
   (c-err-clear)
-  (let [{:keys [subject public-key signing-key issuer san ca? key-usage extended-key-usage serial]} opts
-        _ (parse-dn subject)
-        pub-der (key-der :public-key public-key :jolt.crypto/public-key)
-        priv-der (key-der :signing-key signing-key :jolt.crypto/private-key)
-        md (signing-digest (.getAlgorithm signing-key))
-        _ (when (and (some? issuer) (not (instance? X509Certificate issuer)))
-            (fail (str ":issuer must be an X509Certificate, got " (pr-str issuer)) {:option :issuer}))
-        [not-before not-after] (validity opts)
-        serial (serial-hex serial)
-        san (san-conf san)
-        ku (usage-conf :key-usage key-usages (if (and ca? (nil? key-usage)) ca-key-usage key-usage))
-        _ (when (and ca? (some? key-usage) (not (some #{:key-cert-sign} key-usage)))
-            (fail ":ca? true needs :key-cert-sign in :key-usage, or a CA cannot issue certificates"
-                  {:key-usage key-usage}))
-        eku (usage-conf :extended-key-usage extended-key-usages extended-key-usage)
+  (let [spec (certificate-spec opts)
         der (with-owner
               (fn [own]
-                (let [pub (d2i own c-d2i-pubkey c-pkey-free pub-der "decoding :public-key")
-                      priv (d2i own c-d2i-privkey c-pkey-free priv-der "decoding :signing-key")
-                      issuer-x (when issuer
-                                 (d2i own c-d2i-x509 c-x509-free (.getEncoded issuer) "decoding :issuer"))
-                      x (own (c-x509-new) c-x509-free "X509_new")
-                      subject-name (build-name own subject)
-                      ctx (own (ffi/alloc v3-ctx-size) ffi/free "alloc")]
-                  (when issuer-x
-                    (when (zero? (c-check-ca issuer-x))
-                      (c-err-clear)
-                      (fail (str ":issuer " (.getName (.getSubjectX500Principal issuer))
-                                 " is not a CA (it needs basicConstraints CA:TRUE)") {:option :issuer}))
-                    (when (not= 1 (c-check-private-key issuer-x priv))
-                      (c-err-clear)
-                      (fail ":signing-key does not match the :issuer certificate's public key"
-                            {:option :signing-key})))
-                  (when (not= 1 (c-x509-set-version x x509-version-3)) (native-fail "X509_set_version" {}))
-                  (set-serial! own x serial)
-                  (set-time! c-getm-not-before x not-before "notBefore")
-                  (set-time! c-getm-not-after x not-after "notAfter")
-                  (when (not= 1 (c-x509-set-subject x subject-name)) (native-fail "setting the subject" {}))
-                  (when (not= 1 (c-x509-set-issuer x (if issuer-x (c-x509-get-subject issuer-x) subject-name)))
-                    (native-fail "setting the issuer" {}))
-                  (when (not= 1 (c-x509-set-pubkey x pub)) (native-fail "setting the public key" {}))
-                  (when (and (nil? issuer-x) (not= 1 (c-check-private-key x priv)))
-                    (c-err-clear)
-                    (fail ":signing-key does not match :public-key, and a certificate without :issuer is self-signed"
-                          {:option :signing-key}))
-                  (c-v3-set-ctx ctx (or issuer-x x) x ffi/null ffi/null 0)
-                  (add-ext! own x ctx nid-basic-constraints (if ca? "critical,CA:TRUE" "CA:FALSE") "basicConstraints")
-                  (when ku (add-ext! own x ctx nid-key-usage (str "critical," ku) "keyUsage"))
-                  (when eku (add-ext! own x ctx nid-ext-key-usage eku "extendedKeyUsage"))
-                  (when san (add-ext! own x ctx nid-subject-alt-name san "subjectAltName"))
-                  (add-ext! own x ctx nid-subject-key-identifier "hash" "subjectKeyIdentifier")
-                  (when issuer-x
-                    (add-ext! own x ctx nid-authority-key-identifier "keyid,issuer" "authorityKeyIdentifier"))
-                  (when (<= (c-x509-sign x priv md) 0) (native-fail "signing the certificate" {}))
-                  (der-out c-i2d-x509 x))))]
+                (let [natives (decode-natives own spec)]
+                  (set-fields! own natives spec)
+                  (add-extensions! own natives spec)
+                  (when (<= (c-x509-sign (:x natives) (:priv natives) (:md spec)) 0)
+                    (native-fail "signing the certificate" {}))
+                  (der-out c-i2d-x509 (:x natives)))))]
     (.generateCertificate (CertificateFactory/getInstance "X.509") der)))
 
 (def ^:private generate-options

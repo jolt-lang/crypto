@@ -12,12 +12,25 @@ matching `:git/sha`.
 ### Added
 
 - CI runs jolt-metrics and fails on a new critical finding, unused code or a
-  lint warning (`ci/metrics-gate.clj`, adapted from jolt's). The findings that
-  were already there at 0.4.1 are allowlisted at their current values: six
-  critical ones, among them `install!` and the 1432-line `jolt/crypto.clj`, plus
-  an unused public function and four `:refer :all` lints in the ported tests.
-  `jolt run metrics` prints the report and
-  `jolt run metrics-gate` runs the check locally.
+  lint warning (`ci/metrics-gate.clj`, adapted from jolt's). What it lets
+  through is listed in `ci/metrics-allow.edn`: `jolt/crypto.clj`'s hotspot
+  risk, which follows churn rather than the code, an unused public function and
+  four `:refer :all` lints in the ported tests. `jolt run metrics` prints the
+  report and `jolt run metrics-gate` runs the check locally.
+
+### Changed
+
+- Refactored the code that was critical when the metrics check was added, with
+  no change in behaviour. `jolt.crypto` went from 1432 source lines to 923: its
+  libcrypto bindings, shared helpers, X.509 certificate parsing and shims, and
+  the pbeWithMD5AndDES PKCS#8 decoder moved to namespaces under
+  `jolt.crypto.internal`, and `install!` is a short list of per-class
+  installers. `cipher-context`, `x509/certificate`, `transcode-to-concat` and
+  the GCM engine's `process-gcm!` were split into smaller functions.
+- The `c-*` libcrypto bindings that were public vars of `jolt.crypto` now live
+  in `jolt.crypto.internal.libcrypto`. They were never documented API, but code
+  that redefined them (in a test's `with-redefs`, say) has to name the new
+  namespace.
 
 ### Fixed
 

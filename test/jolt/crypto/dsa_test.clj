@@ -19,10 +19,10 @@
 (ns jolt.crypto.dsa-test
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is testing]]
-            [jolt.crypto :as crypto]
             [jolt.crypto.bytes :as bytes]
             [jolt.crypto.codecs :as codecs]
             [jolt.crypto.dsa :as dsa]
+            [jolt.crypto.internal.libcrypto :as lc]
             [jolt.crypto.keys :as keys])
   (:import [java.io ByteArrayInputStream]
            [java.security KeyFactory KeyPairGenerator Signature]
@@ -279,13 +279,13 @@
 (deftest pss-native-contexts-are-freed-on-signing-failure
   (let [md-frees (atom 0)
         pkey-frees (atom 0)
-        original-md-free crypto/c-md-ctx-free
-        original-pkey-free crypto/c-pkey-free]
-    (with-redefs [crypto/c-dgst-sign (fn [& _] 0)
-                  crypto/c-md-ctx-free (fn [ctx]
+        original-md-free lc/c-md-ctx-free
+        original-pkey-free lc/c-pkey-free]
+    (with-redefs [lc/c-dgst-sign (fn [& _] 0)
+                  lc/c-md-ctx-free (fn [ctx]
                                          (swap! md-frees inc)
                                          (original-md-free ctx))
-                  crypto/c-pkey-free (fn [pkey]
+                  lc/c-pkey-free (fn [pkey]
                                        (swap! pkey-frees inc)
                                        (original-pkey-free pkey))]
       (is (thrown? clojure.lang.ExceptionInfo

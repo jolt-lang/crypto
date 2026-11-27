@@ -4,10 +4,10 @@
 ;; cyclomatic, cognitive, lines, nesting or params limit, or a file over 1000
 ;; source lines) or a file jolt-metrics cannot read fails the build.
 ;;
-;; :criticals: the critical findings that were there before the gate, as of
-;; v0.4.1. Each one records the value of every rule it breaks, measured with
-;; jolt-metrics v0.8.2, and fails once any of them gets worse. Delete an entry when its function is
-;; refactored below the critical limits; the gate fails on a stale one.
+;; :criticals: critical findings that stay on purpose. Each one records the
+;; value of every rule it breaks and fails once any of them gets worse or a new
+;; rule goes critical. Delete an entry when its finding drops below the critical
+;; limits; the gate fails on a stale one.
 ;;
 ;; :unused-requires, :unused-private, :unused-public and :lints are unused code
 ;; and lint findings that stay on purpose, as in jolt's ci/metrics-allow.edn.
@@ -15,24 +15,9 @@
 ;; keeps. Every entry needs a :why.
 {:critical-free ["src/" "test/"]
  :criticals
- [{:path "src/jolt/crypto.clj" :name "install!"
-   :limits {:cyclomatic 79 :cognitive 107 :lines 320 :maintainability 5.6}
-   :why "registers every class's constructor, statics and methods in one function; splitting it per class is its own change"}
-  {:path "src/jolt/crypto.clj" :name "src/jolt/crypto.clj"
-   :limits {:file-lines 1432 :hotspot 1.0}
-   :why "the class shims and the OpenSSL bindings they share; splitting the namespace is its own change. :hotspot is set to its maximum because it moves with churn and the calendar, not with the code"}
-  {:path "src/jolt/crypto/x509.clj" :name "certificate"
-   :limits {:cyclomatic 26 :cognitive 43 :lines 60}
-   :why "validates every option and builds the certificate in one scope that frees the native objects; splitting it is its own change"}
-  {:path "src/jolt/crypto/internal/openssl.clj" :name "cipher-context"
-   :limits {:cyclomatic 32 :cognitive 44 :lines 69}
-   :why "came with the Buddy port (#24); one context builder for every cipher mode"}
-  {:path "src/jolt/crypto/crypto.clj" :name "process-gcm!"
-   :limits {:params 8}
-   :why "came with the Buddy port (#24)"}
-  {:path "src/jolt/crypto/util/ecdsa.clj" :name "transcode-to-concat"
-   :limits {:cyclomatic 22}
-   :why "came with the Buddy port (#24), which follows Nimbus JOSE + JWT's transcoder"}]
+ [{:path "src/jolt/crypto.clj" :name "src/jolt/crypto.clj"
+   :limits {:hotspot 1.0}
+   :why "hotspot risk is churn-driven: as the repo's most complex file its score is its commit count over the last 90 days out of 20, so no refactor keeps it under 0.8. :hotspot is set to its maximum and every other rule (file-lines included) still gates"}]
  :unused-requires []
  :unused-private []
  :unused-public

@@ -125,30 +125,38 @@
   Object
   (getBlockSize [_] 16))
 
-(defn- process-gcm! [holder operation pending input inoff inlen out outoff]
+(defn- gcm-encrypt-window! [ctx window out outoff]
+  (let [length (count window)]
+    (validate-output-window out outoff length)
+    (System/arraycopy (openssl/cipher-update ctx :encrypt window) 0 out outoff length)
+    length))
+
+(defn- gcm-decrypt-window!
+  "Decrypt what the window adds, holding back the last 16 bytes seen so far in
+  pending: until the input ends they may be the authentication tag."
+  [ctx pending window out outoff]
+  (let [combined (bytes/concat @pending window)
+        total (count combined)
+        output-length (max 0 (- total 16))]
+    (validate-output-window out outoff output-length)
+    (reset! pending (bytes/slice combined output-length total))
+    (when (pos? output-length)
+      (let [result (openssl/cipher-update ctx :decrypt
+                                          (bytes/slice combined 0 output-length))]
+        (System/arraycopy result 0 out outoff output-length)))
+    output-length))
+
+(defn- process-gcm! [{:keys [context operation pending]} input inoff inlen out outoff]
   (validate-input-window input inoff inlen)
-  (let [ctx (require-context holder)]
+  (let [ctx (require-context context)]
     (try
       (let [window (bytes/slice input inoff (+ inoff inlen))]
         (if (= :encrypt @operation)
-          (do
-            (validate-output-window out outoff inlen)
-            (let [result (openssl/cipher-update ctx :encrypt window)]
-              (System/arraycopy result 0 out outoff inlen)
-              inlen))
-          (let [combined (bytes/concat @pending window)
-                total (count combined)
-                output-length (max 0 (- total 16))]
-            (validate-output-window out outoff output-length)
-            (reset! pending (bytes/slice combined output-length total))
-            (when (pos? output-length)
-              (let [result (openssl/cipher-update ctx :decrypt
-                                                  (bytes/slice combined 0 output-length))]
-                (System/arraycopy result 0 out outoff output-length)))
-            output-length)))
+          (gcm-encrypt-window! ctx window out outoff)
+          (gcm-decrypt-window! ctx pending window out outoff)))
       (catch Exception e
         (reset! pending (byte-array 0))
-        (openssl/free-cipher-context! holder)
+        (openssl/free-cipher-context! context)
         (throw e)))))
 
 (defn- finalize-gcm! [holder operation pending output offset]
@@ -194,12 +202,12 @@
     (finalize-gcm! context operation pending out offset))
 
   IBlockCipherLike
-  (-process-block [_ in inoff out outoff]
-    (process-gcm! context operation pending in inoff (- (count in) inoff) out outoff))
+  (-process-block [this in inoff out outoff]
+    (process-gcm! this in inoff (- (count in) inoff) out outoff))
 
   IStreamCipherLike
-  (-process-bytes [_ in inoff inlen out outoff]
-    (process-gcm! context operation pending in inoff inlen out outoff))
+  (-process-bytes [this in inoff inlen out outoff]
+    (process-gcm! this in inoff inlen out outoff))
 
   Object
   (getBlockSize [_] 16)

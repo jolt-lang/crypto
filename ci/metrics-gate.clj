@@ -12,7 +12,9 @@
 ;;   finding that predates the gate by path and name and records the value of
 ;;   each rule it breaks in :limits. It passes while no rule gets worse than
 ;;   recorded and no new rule goes critical. An entry whose finding is no longer
-;;   critical fails as stale, so it's removed once the code is fixed.
+;;   critical fails as stale, so it's removed once the code is fixed, unless it
+;;   records only :hotspot: hotspot risk follows churn, so such an entry's
+;;   finding comes and goes with the calendar.
 ;;
 ;; * Unused code. The allowlist names each unused require, unused private
 ;;   function and unreferenced public function that stays on purpose, with the
@@ -72,6 +74,12 @@
                 (name (:rule v))))
          "; fix it rather than raising the entry")))
 
+(defn- churn-only?
+  "Whether a :criticals entry records only hotspot risk, which rises and falls
+  with recent churn rather than with the code."
+  [entry]
+  (= #{:hotspot} (set (keys (:limits entry)))))
+
 (defn- critical-problems [report allow allow-path]
   (let [prefixes (:critical-free allow)
         criticals (filter #(and (= :critical (:severity %)) (under? prefixes (:path %)))
@@ -87,7 +95,8 @@
                      (str/join ", " (for [v (:violations f) :when (= :critical (:band v))]
                                       (str (name (:rule v)) " " (:value v) " > " (:limit v)))))])]
        p)
-     (for [[k _] (sort-by key allowed) :when (not (contains? found k))]
+     (for [[k entry] (sort-by key allowed)
+           :when (not (or (contains? found k) (churn-only? entry)))]
        (str "stale :criticals entry " (pr-str k)
             " — it is no longer critical; remove it from " allow-path))
      (for [e (:errors report) :when (under? prefixes (:path e))]
