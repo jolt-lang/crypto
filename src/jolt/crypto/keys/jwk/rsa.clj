@@ -14,7 +14,8 @@
 ;; limitations under the License.
 ;;
 ;; Modified in 2026 for Jolt: replaced Bouncy Castle RSA specs with OpenSSL
-;; parameters, recovered CRT factors for PKCS#8, and hand-built RFC 7638 JSON.
+;; parameters, validated supplied and recovered CRT factors, and hand-built
+;; RFC 7638 JSON.
 
 (ns jolt.crypto.keys.jwk.rsa
   "JWK support for RSA keys."
@@ -84,21 +85,56 @@
   (let [length (proto/calc-byte-length value)]
     (codecs/b64->bytes (proto/bigint->b64str length value) true)))
 
+(def ^:private crt-fields [:p :q :dp :dq :qi])
+
+(defn- invalid-crt []
+  (throw (ex-info "Invalid RSA CRT parameters" {})))
+
+(defn- supplied-crt-parameters [n e d jwk]
+  (let [parameters (into {} (map (fn [field]
+                                   [field (proto/b64str->bigint (get jwk field))])
+                                 crt-fields))
+        {:keys [p q dp dq qi]} parameters]
+    (when-not (and (pos? n) (pos? e) (pos? d)
+                   (< 1 p) (< 1 q)
+                   (= n (* p q))
+                   (= dp (mod d (dec p)))
+                   (= dq (mod d (dec q)))
+                   (pos? qi)
+                   (= 1 (mod (* qi q) p)))
+      (invalid-crt))
+    parameters))
+
+(defn- native-parameters [jwk crt]
+  {:n (codecs/b64->bytes (:n jwk) true)
+   :e (codecs/b64->bytes (:e jwk) true)
+   :d (codecs/b64->bytes (:d jwk) true)
+   :p (unsigned-bytes (:p crt))
+   :q (unsigned-bytes (:q crt))
+   :dp (unsigned-bytes (:dp crt))
+   :dq (unsigned-bytes (:dq crt))
+   :qi (unsigned-bytes (:qi crt))})
+
 (defmethod proto/jwk->private-key "RSA"
   [jwk]
   (let [n (proto/b64str->bigint (:n jwk))
         e (proto/b64str->bigint (:e jwk))
         d (proto/b64str->bigint (:d jwk))
-        crt (crt-parameters n e d)]
-    (crypto/rsa-private-from-parameters
-     {:n (codecs/b64->bytes (:n jwk) true)
-      :e (codecs/b64->bytes (:e jwk) true)
-      :d (codecs/b64->bytes (:d jwk) true)
-      :p (unsigned-bytes (:p crt))
-      :q (unsigned-bytes (:q crt))
-      :dp (unsigned-bytes (:dp crt))
-      :dq (unsigned-bytes (:dq crt))
-      :qi (unsigned-bytes (:qi crt))})))
+        supplied (filter #(contains? jwk %) crt-fields)]
+    (when-not (or (empty? supplied) (= (count crt-fields) (count supplied)))
+      (throw (ex-info "Incomplete RSA CRT parameters"
+                      {:supplied (vec supplied)
+                       :missing (vec (remove #(contains? jwk %) crt-fields))})))
+    (let [direct? (seq supplied)
+          ;; Only n/e/d-only keys use bounded recovery. Complete CRT inputs
+          ;; bypass it and are validated here and by RSA_check_key.
+          crt (if direct?
+                (supplied-crt-parameters n e d jwk)
+                (crt-parameters n e d))
+          key (crypto/rsa-private-from-parameters (native-parameters jwk crt))]
+      (when direct?
+        (jolt.host/ref-put! key :jwk-crt? true))
+      key)))
 
 (defmethod proto/jwk->public-key "RSA"
   [jwk]
@@ -131,7 +167,16 @@
       (throw (ex-info "Public key doesn't match private key"
                       {:expected (codecs/bytes->hex private-n)
                        :actual (:n public-jwk)})))
-    (assoc public-jwk :d (proto/bigint->b64str (proto/calc-byte-length private-n') d))))
+    (let [base-jwk (assoc public-jwk :d (proto/bigint->b64str (proto/calc-byte-length d) d))]
+      (if (jolt.host/ref-get private :jwk-crt?)
+        (reduce (fn [result field]
+                  (let [value (proto/b64str->bigint
+                               (proto/bytes->b64str (get private-parameters field)))]
+                    (assoc result field
+                           (proto/bigint->b64str (proto/calc-byte-length value) value))))
+                base-jwk
+                crt-fields)
+        base-jwk))))
 
 ;; https://tools.ietf.org/html/rfc7638#section-3.1
 (defmethod proto/thumbprint "RSA"

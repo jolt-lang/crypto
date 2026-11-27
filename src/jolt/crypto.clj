@@ -107,6 +107,8 @@
 (ffi/defcfn c-rsa-set0-factors "RSA_set0_factors"   [:pointer :pointer :pointer] :int)
 (ffi/defcfn c-rsa-set0-crt    "RSA_set0_crt_params" [:pointer :pointer :pointer :pointer] :int)
 (ffi/defcfn c-rsa-get0-key    "RSA_get0_key"        [:pointer :pointer :pointer :pointer] :void)
+(ffi/defcfn c-rsa-get0-factors "RSA_get0_factors"   [:pointer :pointer :pointer] :void)
+(ffi/defcfn c-rsa-get0-crt    "RSA_get0_crt_params" [:pointer :pointer :pointer :pointer] :void)
 (ffi/defcfn c-rsa-check       "RSA_check_key"       [:pointer] :int)
 (ffi/defcfn c-pkey-get-rsa    "EVP_PKEY_get1_RSA"   [:pointer] :pointer)
 (ffi/defcfn c-ec-set-private  "EC_KEY_set_private_key" [:pointer :pointer] :int)
@@ -746,12 +748,20 @@
           (c-err-clear)
           (throw (ex-info "Expected an RSA key" {})))
         (try
-          (let [holders (ffi/alloc (* 3 ptr-size))]
+          (let [holders (ffi/alloc (* 8 ptr-size))]
             (try
               (c-rsa-get0-key rsa holders (+ holders ptr-size) (+ holders (* 2 ptr-size)))
+              (c-rsa-get0-factors rsa (+ holders (* 3 ptr-size)) (+ holders (* 4 ptr-size)))
+              (c-rsa-get0-crt rsa (+ holders (* 5 ptr-size)) (+ holders (* 6 ptr-size))
+                              (+ holders (* 7 ptr-size)))
               (f (bn->unsigned (ffi/read holders :pointer 0))
                  (bn->unsigned (ffi/read holders :pointer ptr-size))
-                 (bn->unsigned (ffi/read holders :pointer (* 2 ptr-size))))
+                 (bn->unsigned (ffi/read holders :pointer (* 2 ptr-size)))
+                 (bn->unsigned (ffi/read holders :pointer (* 3 ptr-size)))
+                 (bn->unsigned (ffi/read holders :pointer (* 4 ptr-size)))
+                 (bn->unsigned (ffi/read holders :pointer (* 5 ptr-size)))
+                 (bn->unsigned (ffi/read holders :pointer (* 6 ptr-size)))
+                 (bn->unsigned (ffi/read holders :pointer (* 7 ptr-size))))
               (finally (ffi/free holders))))
           (finally (c-rsa-free rsa)))))))
 
@@ -759,13 +769,14 @@
   "Return {:n bytes :e bytes} from a tagged RSA PublicKey. JWK-internal."
   [key]
   (with-rsa-parameters key false
-    (fn [n e _] {:n n :e e})))
+    (fn [n e _ _ _ _ _ _] {:n n :e e})))
 
 (defn rsa-private-parameters
-  "Return unsigned {:n :e :d} bytes from a tagged RSA PrivateKey."
+  "Return unsigned RSA key and CRT bytes from a tagged RSA PrivateKey."
   [key]
   (with-rsa-parameters key true
-    (fn [n e d] {:n n :e e :d d})))
+    (fn [n e d p q dp dq qi]
+      {:n n :e e :d d :p p :q q :dp dp :dq dq :qi qi})))
 
 (defn- ec-set-public! [eck x y]
   (let [group (c-ec-get0-group eck)

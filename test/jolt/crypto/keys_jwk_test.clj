@@ -196,6 +196,41 @@
            (b64u-str signature)))
     (is (dsa/verify payload signature {:alg :rsassa-pkcs15+sha256 :key public}))))
 
+(def rsa-short-d-crt-jwk
+  {:kty "RSA"
+   :n "DKE"
+   :e "Bw"
+   :d "3w"
+   :p "PQ"
+   :q "NQ"
+   :dp "Kw"
+   :dq "Dw"
+   :qi "Jg"})
+
+(deftest rsa-crt-bearing-key-round-trips-with-minimum-length-integers
+  (let [[public private] (load-pair rsa-short-d-crt-jwk)
+        round-trip (keys/jwk private public)
+        encoded-d (b64u (:d round-trip))]
+    (is (keys/public-key? public))
+    (is (keys/private-key? private))
+    (is (= rsa-short-d-crt-jwk round-trip))
+    (is (= 1 (alength encoded-d)))
+    (is (= 0xdf (bit-and (aget encoded-d 0) 0xff)))
+    (doseq [field [:n :e :d :p :q :dp :dq :qi]]
+      (is (not (zero? (aget (b64u (get round-trip field)) 0)))))))
+
+(deftest inconsistent-or-incomplete-rsa-crt-fields-throw
+  (doseq [[field value] [[:p "Pg"] [:q "Ng"] [:dp "LA"] [:dq "Dg"] [:qi "Jw"]]]
+    (testing field
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Invalid RSA CRT parameters"
+                            (keys/jwk->private-key (assoc rsa-short-d-crt-jwk field value))))))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Incomplete RSA CRT parameters"
+                        (keys/jwk->private-key (dissoc rsa-short-d-crt-jwk :qi)))))
+
+(deftest rsa-factor-recovery-failure-remains-closed
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Could not recover RSA factors from n/e/d"
+                        (keys/jwk->private-key {:kty "RSA" :n "Ag" :e "Aw" :d "Bw"}))))
+
 (def rsa-jwk-pubkey
   {:kty "RSA"
    :n "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw"
@@ -282,6 +317,33 @@
         (is (= coordinate-length (alength (b64u (:y jwk)))))
         (is (= jwk (keys/jwk private public)))
         (is (dsa/verify message signature {:alg signature-algorithm :key public}))))))
+
+(deftest ec-imports-enforce-exact-coordinate-widths
+  (let [p384 (let [pair (.generateKeyPair
+                          (doto (KeyPairGenerator/getInstance "EC")
+                            (.initialize (ECGenParameterSpec. "secp384r1"))))]
+               (keys/jwk (.getPrivate pair) (.getPublic pair)))
+        secp256k1 (let [pair (.generateKeyPair
+                               (doto (KeyPairGenerator/getInstance "EC")
+                                 (.initialize (ECGenParameterSpec. "secp256k1"))))]
+                    (keys/jwk (.getPrivate pair) (.getPublic pair)))]
+    (doseq [[jwk width] [[ec256-jwk-key 32]
+                         [p384 48]
+                         [ec521-jwk-key 66]
+                         [secp256k1 32]]
+            field [:x :y]
+            importer [keys/jwk->public-key keys/jwk->private-key]]
+      (let [coordinate (b64u (get jwk field))
+            short-coordinate (if (zero? (aget coordinate 0))
+                               (bytes/slice coordinate 1 width)
+                               (bytes/slice coordinate 0 (dec width)))
+            overlong-coordinate (bytes/concat (byte-array [0]) coordinate)]
+        (testing (str (:crv jwk) " " field " short")
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Invalid EC coordinate width"
+                                (importer (assoc jwk field (b64u-str short-coordinate))))))
+        (testing (str (:crv jwk) " " field " overlong leading zero")
+          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Invalid EC coordinate width"
+                                (importer (assoc jwk field (b64u-str overlong-coordinate))))))))))
 
 (deftest public-private-consistency-is-enforced
   (let [[ec-public _] (load-pair ec256-jwk-key)

@@ -35,18 +35,28 @@
   [jwk]
   (jwkec->private-key jwk))
 
+(def ^:private coordinate-widths
+  {"P-256" 32 "P-384" 48 "P-521" 66 "secp256k1" 32})
+
+(defn- decode-coordinate [jwk curve field]
+  (let [coordinate (codecs/b64->bytes (get jwk field) true)
+        expected (get coordinate-widths curve)
+        actual (alength coordinate)]
+    (when-not (= expected actual)
+      (throw (ex-info "Invalid EC coordinate width"
+                      {:curve curve :field field :expected expected :actual actual})))
+    coordinate))
+
 (defn- load-private [jwk curve]
-  (crypto/ec-private-from-parameters
-   curve
-   (codecs/b64->bytes (:d jwk) true)
-   (codecs/b64->bytes (:x jwk) true)
-   (codecs/b64->bytes (:y jwk) true)))
+  (let [x (decode-coordinate jwk curve :x)
+        y (decode-coordinate jwk curve :y)
+        d (codecs/b64->bytes (:d jwk) true)]
+    (crypto/ec-private-from-parameters curve d x y)))
 
 (defn- load-public [jwk curve]
-  (crypto/ec-public-from-parameters
-   curve
-   (codecs/b64->bytes (:x jwk) true)
-   (codecs/b64->bytes (:y jwk) true)))
+  (let [x (decode-coordinate jwk curve :x)
+        y (decode-coordinate jwk curve :y)]
+    (crypto/ec-public-from-parameters curve x y)))
 
 (doseq [curve ["P-256" "P-384" "P-521" "secp256k1"]]
   (defmethod jwkec->private-key curve [jwk] (load-private jwk curve))
