@@ -2,9 +2,26 @@
   "Drives the shims through the javax.crypto / java.security surface, exactly the
   way ring-core's session-cookie store does."
   (:require [jolt.crypto]
+            [jolt.crypto.bytes :as crypto-bytes]
+            [jolt.crypto.crypto :as buddy-crypto]
+            [jolt.crypto.bytes-test]
+            [jolt.crypto.codecs-test]
+            [jolt.crypto.padding-test]
+            [jolt.crypto.nonce-test]
+            [jolt.crypto.hash-test]
+            [jolt.crypto.mac-test]
+            [jolt.crypto.kdf-test]
+            [jolt.crypto.crypto-test]
+            [jolt.crypto.keys-test]
+            [jolt.crypto.keys-jwk-test]
+            [jolt.crypto.certificates-test]
+            [jolt.crypto.dsa-test]
+            [jolt.crypto.util.ecdsa-test]
+            [jolt.crypto.util.deflate-test]
             [jolt.crypto.x509-test :as x509-test]
             [clojure.edn :as edn]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [clojure.test :as t]))
 
 (import '[javax.crypto Cipher Mac])
 (import '[javax.crypto.spec SecretKeySpec IvParameterSpec])
@@ -270,8 +287,36 @@
              (and (not (str/starts-with? c "/usr/lib/"))
                   (not (#{"libcrypto.dylib" "libssl.dylib"} c)))))))
 
+(defn- test-buddy-authenticated-encryption []
+  (let [key (byte-array (range 32))
+        iv (byte-array (range 16))
+        plaintext (byte-array (map int "Buddy-compatible authenticated encryption"))
+        encrypted (buddy-crypto/encrypt plaintext key iv)]
+    (check "Buddy default CBC-HMAC round-trips"
+           (crypto-bytes/equals? plaintext (buddy-crypto/decrypt encrypted key iv))))
+  (let [key (byte-array (range 16))
+        iv (byte-array (range 12))
+        aad (byte-array (range 20))
+        plaintext (byte-array (map int "GCM authenticates AAD"))
+        encrypted (buddy-crypto/encrypt plaintext key iv {:alg :aes128-gcm :aad aad})]
+    (check "Buddy AES-GCM round-trips with AAD"
+           (crypto-bytes/equals? plaintext
+                                 (buddy-crypto/decrypt encrypted key iv
+                                                       {:alg :aes128-gcm :aad aad})))
+    (check "Buddy AES-GCM appends exactly one 128-bit tag"
+           (= (+ (alength plaintext) 16) (alength encrypted)))
+    (aset-byte encrypted 0 (unchecked-byte (bit-xor (aget encrypted 0) 1)))
+    (check "Buddy AES-GCM tampering returns no plaintext"
+           (= {:type :validation :cause :authtag}
+              (try
+                (buddy-crypto/decrypt encrypted key iv {:alg :aes128-gcm :aad aad})
+                nil
+                (catch Exception e
+                  (ex-data e)))))))
+
 (defn -main [& _]
   (test-native-declarations)
+  (test-buddy-authenticated-encryption)
   (doseq [[canonical alias] [["MD5" "md5"] ["SHA-512" "sha-512"] ["SHA-256" "sHa256"]]]
     (let [input (.getBytes "abc")]
       (check (str "case-insensitive MessageDigest " alias)
@@ -588,9 +633,9 @@
   (check "a non-EC/RSA KeyPairGenerator throws naming it"
          (= "unsupported KeyPairGenerator algorithm: DSA"
             (try (KeyPairGenerator/getInstance "DSA") nil (catch Exception e (.getMessage e)))))
-  (check "a non-EC/RSA KeyFactory throws naming it"
-         (= "unsupported KeyFactory algorithm: DSA"
-            (try (KeyFactory/getInstance "DSA") nil (catch Exception e (.getMessage e)))))
+  (check "an unsupported KeyFactory throws naming it"
+         (= "unsupported KeyFactory algorithm: DH"
+            (try (KeyFactory/getInstance "DH") nil (catch Exception e (.getMessage e)))))
   (check "garbage key bytes are rejected at generatePublic"
          (= "not a valid DER-encoded key"
             (try (.generatePublic (KeyFactory/getInstance "EC") (X509EncodedKeySpec. (byte-array 10)))
@@ -713,6 +758,22 @@
            (int? (.nextInt (java.security.SecureRandom/getInstance "SHA1PRNG") 100)))
     (check "getInstanceStrong returns a working generator"
            (int? (.nextInt (java.security.SecureRandom/getInstanceStrong) 100))))
+
+  (let [{:keys [fail error]} (t/run-tests 'jolt.crypto.bytes-test
+                                          'jolt.crypto.codecs-test
+                                          'jolt.crypto.padding-test
+                                          'jolt.crypto.nonce-test
+                                          'jolt.crypto.hash-test
+                                          'jolt.crypto.mac-test
+                                          'jolt.crypto.kdf-test
+                                          'jolt.crypto.crypto-test
+                                          'jolt.crypto.keys-test
+                                          'jolt.crypto.keys-jwk-test
+                                          'jolt.crypto.certificates-test
+                                          'jolt.crypto.dsa-test
+                                          'jolt.crypto.util.ecdsa-test
+                                          'jolt.crypto.util.deflate-test)]
+    (swap! failures + fail error))
 
   (if (zero? @failures)
     (println "\nALL CRYPTO TESTS PASSED")

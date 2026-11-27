@@ -1,0 +1,25 @@
+jolt.crypto Buddy-compatible API port
+=====================================
+
+This product includes software derived from Buddy Core.
+
+Buddy Core
+Copyright 2014-2020 Andrey Antukh <niwi@niwi.nz>
+Source repository: https://github.com/funcool/buddy-core
+Source revision: 9763a3f
+License: Apache License, Version 2.0
+
+The Buddy-derived source, tests, and fixtures have been modified for Jolt in
+2026. Modifications include namespace mapping to jolt.crypto, replacement of
+JVM/Bouncy Castle/Apache Commons mechanics with Jolt and OpenSSL facilities,
+and additional behavioral regression tests. Prominent modification notices are
+also retained in the derived source and test files. The applicable Apache
+License 2.0 text is provided in LICENSE-buddy-core.
+
+The jolt.crypto.util.ecdsa portion of this port is derived from the ECDSA
+implementation in Nimbus JOSE + JWT, as included by Buddy Core.
+
+Nimbus JOSE + JWT
+Copyright 2012-2016 Connect2id Ltd.
+Source repository: https://bitbucket.org/connect2id/nimbus-jose-jwt/
+License: Apache License, Version 2.0

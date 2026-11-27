@@ -8,9 +8,10 @@
     MessageDigest SHA-512 / SHA-384 / SHA-256 / SHA-224 / SHA-1 / MD5
     SecureRandom  RAND_bytes
     SecretKeySpec / IvParameterSpec   key + IV holders
-    KeyPairGenerator / KeyFactory / Signature   EC over the NIST P-curves,
-                  RSA and Ed25519, with X509EncodedKeySpec /
-                  PKCS8EncodedKeySpec / ECGenParameterSpec
+    KeyPairGenerator   EC over the NIST P-curves, RSA and Ed25519
+    Signature      ECDSA, RSA PKCS#1 v1.5/PSS, Ed25519 and Ed448
+    KeyFactory   EC/RSA/DSA/Ed25519/Ed448, with X509EncodedKeySpec /
+                  PKCS8EncodedKeySpec / ECGenParameterSpec and PEM decoding
     CertificateFactory   X.509 certificates from PEM or DER, as X509Certificate
                   values (subject/issuer X500Principal, validity, serial,
                   signature algorithm, public key, getEncoded)
@@ -25,6 +26,8 @@
   libcrypto/libssl are declared in deps.edn :jolt/native and loaded before this
   namespace; an app that also pulls http-client shares the one loaded copy."
   (:require [jolt.ffi :as ffi]
+            [jolt.crypto.codecs :as codecs]
+            [jolt.crypto.internal.openssl :as openssl]
             [clojure.string :as str]))
 
 ;; --- OpenSSL (libcrypto) bindings -------------------------------------------
@@ -49,7 +52,7 @@
 (ffi/defcfn c-hmac     "HMAC"   [:pointer :pointer :int :pointer :size_t :pointer :pointer] :pointer)
 (ffi/defcfn c-digest   "EVP_Digest" [:pointer :size_t :pointer :pointer :pointer :pointer] :int)
 
-;; EC and RSA keys, ECDSA/RSASSA-PKCS1-v1_5. EVP_EC_gen is a macro rather
+;; EVP keys and ECDSA/RSASSA-PKCS1-v1_5. EVP_EC_gen is a macro rather
 ;; than an exported symbol, so EC keygen goes through EC_KEY and is then
 ;; wrapped in an EVP_PKEY for encoding and signing; RSA keygen goes through
 ;; RSA_new + RSA_generate_key_ex (EVP_PKEY_CTX-based RSA gen needs
@@ -71,12 +74,19 @@
 (ffi/defcfn c-i2d-p8       "i2d_PKCS8_PRIV_KEY_INFO"  [:pointer :pointer] :int)
 (ffi/defcfn c-p8-free      "PKCS8_PRIV_KEY_INFO_free" [:pointer] :void)
 (ffi/defcfn c-d2i-privkey  "d2i_AutoPrivateKey"       [:pointer :pointer :long] :pointer)
+(ffi/defcfn c-pem-read-privkey "PEM_read_bio_PrivateKey" [:pointer :pointer :pointer :pointer] :pointer)
+(ffi/defcfn c-pem-read-pubkey  "PEM_read_bio_PUBKEY"     [:pointer :pointer :pointer :pointer] :pointer)
+(ffi/defcfn c-des-set-key-unchecked "DES_set_key_unchecked" [:pointer :pointer] :void)
+(ffi/defcfn c-des-cbc-encrypt "DES_cbc_encrypt" [:pointer :pointer :long :pointer :pointer :int] :void)
 (ffi/defcfn c-md-ctx-new   "EVP_MD_CTX_new"           [] :pointer)
 (ffi/defcfn c-md-ctx-free  "EVP_MD_CTX_free"          [:pointer] :void)
 (ffi/defcfn c-dgst-sign-init   "EVP_DigestSignInit"   [:pointer :pointer :pointer :pointer :pointer] :int)
 (ffi/defcfn c-dgst-sign        "EVP_DigestSign"       [:pointer :pointer :pointer :pointer :size_t] :int)
 (ffi/defcfn c-dgst-verify-init "EVP_DigestVerifyInit" [:pointer :pointer :pointer :pointer :pointer] :int)
 (ffi/defcfn c-dgst-verify      "EVP_DigestVerify"     [:pointer :pointer :size_t :pointer :size_t] :int)
+(ffi/defcfn c-rsa-padding      "EVP_PKEY_CTX_set_rsa_padding" [:pointer :int] :int)
+(ffi/defcfn c-rsa-pss-saltlen  "EVP_PKEY_CTX_set_rsa_pss_saltlen" [:pointer :int] :int)
+(ffi/defcfn c-rsa-mgf1-md      "EVP_PKEY_CTX_set_rsa_mgf1_md" [:pointer :pointer] :int)
 
 ;; RSA keygen. RSA_generate_key_ex takes the public exponent as a BIGNUM, so a
 ;; BN_new/BN_set_word pair sets the usual 65537 (F4) before the call.
@@ -88,6 +98,34 @@
 (ffi/defcfn c-bn-free      "BN_free"             [:pointer] :void)
 (ffi/defcfn c-pkey-set-rsa "EVP_PKEY_set1_RSA"   [:pointer :pointer] :int)
 
+;; JWK parameter construction and inspection. BIGNUMs are copied into OpenSSL
+;; keys, and every native key/point is released before the public byte/map value
+;; is returned. RSA_set0_* transfers ownership only on success.
+(ffi/defcfn c-bn-bin2bn       "BN_bin2bn"           [:pointer :int :pointer] :pointer)
+(ffi/defcfn c-bn-bn2bin       "BN_bn2bin"           [:pointer :pointer] :int)
+(ffi/defcfn c-bn-num-bits     "BN_num_bits"         [:pointer] :int)
+(ffi/defcfn c-rsa-set0-key    "RSA_set0_key"        [:pointer :pointer :pointer :pointer] :int)
+(ffi/defcfn c-rsa-set0-factors "RSA_set0_factors"   [:pointer :pointer :pointer] :int)
+(ffi/defcfn c-rsa-set0-crt    "RSA_set0_crt_params" [:pointer :pointer :pointer :pointer] :int)
+(ffi/defcfn c-rsa-get0-key    "RSA_get0_key"        [:pointer :pointer :pointer :pointer] :void)
+(ffi/defcfn c-rsa-get0-factors "RSA_get0_factors"   [:pointer :pointer :pointer] :void)
+(ffi/defcfn c-rsa-get0-crt    "RSA_get0_crt_params" [:pointer :pointer :pointer :pointer] :void)
+(ffi/defcfn c-rsa-check       "RSA_check_key"       [:pointer] :int)
+(ffi/defcfn c-pkey-get-rsa    "EVP_PKEY_get1_RSA"   [:pointer] :pointer)
+(ffi/defcfn c-ec-set-private  "EC_KEY_set_private_key" [:pointer :pointer] :int)
+(ffi/defcfn c-ec-set-public   "EC_KEY_set_public_key"  [:pointer :pointer] :int)
+(ffi/defcfn c-ec-get0-group   "EC_KEY_get0_group"      [:pointer] :pointer)
+(ffi/defcfn c-ec-get0-private "EC_KEY_get0_private_key" [:pointer] :pointer)
+(ffi/defcfn c-ec-get0-public  "EC_KEY_get0_public_key"  [:pointer] :pointer)
+(ffi/defcfn c-ec-check        "EC_KEY_check_key"       [:pointer] :int)
+(ffi/defcfn c-ec-group-nid    "EC_GROUP_get_curve_name" [:pointer] :int)
+(ffi/defcfn c-ec-point-new    "EC_POINT_new"          [:pointer] :pointer)
+(ffi/defcfn c-ec-point-free   "EC_POINT_free"         [:pointer] :void)
+(ffi/defcfn c-ec-point-set    "EC_POINT_set_affine_coordinates" [:pointer :pointer :pointer :pointer :pointer] :int)
+(ffi/defcfn c-ec-point-mul    "EC_POINT_mul"          [:pointer :pointer :pointer :pointer :pointer :pointer] :int)
+(ffi/defcfn c-ec-point-octets "EC_POINT_point2oct"    [:pointer :pointer :int :pointer :size_t :pointer] :size_t)
+(ffi/defcfn c-pkey-get-ec     "EVP_PKEY_get1_EC_KEY"  [:pointer] :pointer)
+
 ;; Ed25519 keygen goes through an EVP_PKEY_CTX for the key type (NID 1087).
 ;; These are exported functions in both 1.1.1 and 3. Signing needs nothing
 ;; new: EVP_DigestSign/EVP_DigestVerify with a NULL digest are Ed25519's
@@ -96,14 +134,14 @@
 (ffi/defcfn c-pkey-keygen-init "EVP_PKEY_keygen_init" [:pointer] :int)
 (ffi/defcfn c-pkey-keygen      "EVP_PKEY_keygen"      [:pointer :pointer] :int)
 (ffi/defcfn c-pkey-ctx-free    "EVP_PKEY_CTX_free"    [:pointer] :void)
+(ffi/defcfn c-pkey-new-raw-private "EVP_PKEY_new_raw_private_key" [:int :pointer :pointer :size_t] :pointer)
+(ffi/defcfn c-pkey-new-raw-public  "EVP_PKEY_new_raw_public_key"  [:int :pointer :pointer :size_t] :pointer)
+(ffi/defcfn c-pkey-get-raw-private "EVP_PKEY_get_raw_private_key" [:pointer :pointer :pointer] :int)
+(ffi/defcfn c-pkey-get-raw-public  "EVP_PKEY_get_raw_public_key"  [:pointer :pointer :pointer] :int)
 
-;; What a parsed key actually is. EVP_PKEY_base_id is a real function in 1.1 but
-;; a macro for EVP_PKEY_get_base_id in 3, so neither spelling resolves on both;
-;; EVP_PKEY_get0_* are exported functions in either. A miss pushes
-;; EVP_R_EXPECTING_A_* onto the thread's error queue, which nothing here reads,
-;; so clear it rather than let it accumulate.
-(ffi/defcfn c-pkey-get0-ec  "EVP_PKEY_get0_EC_KEY" [:pointer] :pointer)
-(ffi/defcfn c-pkey-get0-rsa "EVP_PKEY_get0_RSA"    [:pointer] :pointer)
+;; OpenSSL 3 reports the decoded key's concrete type directly. This avoids
+;; guessing from filenames or probing algorithm-specific getters.
+(ffi/defcfn c-pkey-type-name "EVP_PKEY_get0_type_name" [:pointer] :pointer)
 (ffi/defcfn c-err-clear     "ERR_clear_error"      []         :void)
 
 ;; X.509 certificates. A certificate is parsed from PEM (PEM_read_bio_X509) or
@@ -300,35 +338,21 @@
         (try (f pkey) (finally (c-pkey-free pkey))))
       (finally (ffi/free buf) (ffi/free holder)))))
 
+(defn- pkey-type [pkey]
+  (let [name-ptr (c-pkey-type-name pkey)]
+    (when-not (ffi/null? name-ptr)
+      (case (ffi/ptr->string name-ptr)
+        "ED25519" "Ed25519"
+        "ED448" "Ed448"
+        (ffi/ptr->string name-ptr)))))
+
 (defn- pkey-algo
-  "The algorithm a parsed EVP_PKEY actually is: \"EC\", \"RSA\", or nil for
-  anything else — the EVP_Digest* path is algorithm-agnostic, so a key type
-  this namespace does not name is not by itself a reason to refuse."
+  "The JDK algorithm name for a parsed OpenSSL key."
   [pkey]
-  (let [algo (cond
-               (not (ffi/null? (c-pkey-get0-ec pkey)))  "EC"
-               (not (ffi/null? (c-pkey-get0-rsa pkey))) "RSA")]
-    (c-err-clear)
-    algo))
-
-;; Ed25519's AlgorithmIdentifier, SEQUENCE { OID 1.3.101.112 } with no
-;; parameters. OpenSSL has no accessor for an Ed25519 key that is an exported
-;; function in both 1.1 and 3 (EVP_PKEY_id is a macro in 3, EVP_PKEY_get_id
-;; absent in 1.1), so the key type is read from the DER instead. It sits right
-;; after the outer SEQUENCE header in SubjectPublicKeyInfo and after the version
-;; INTEGER in PKCS#8; Ed25519 keys are short, so both lengths are one byte.
-(def ^:private ed25519-algorithm-id [0x30 0x05 0x06 0x03 0x2b 0x65 0x70])
-
-(defn- ed25519-der? [der]
-  (let [b (mapv #(bit-and % 0xff) (take 12 (seq (as-ba der))))
-        at? (fn [i] (= ed25519-algorithm-id (subvec b (min i (count b)) (min (+ i 7) (count b)))))]
-    (and (= 0x30 (first b)) (or (at? 2) (at? 5)))))
-
-(defn- key-algo
-  "The algorithm of a DER key and its parsed EVP_PKEY: \"EdDSA\" (the JDK's
-  name for an Ed25519 key), \"EC\", \"RSA\", or nil."
-  [der pkey]
-  (if (ed25519-der? der) "EdDSA" (pkey-algo pkey)))
+  (case (pkey-type pkey)
+    "Ed25519" "EdDSA"
+    "Ed448" "EdDSA"
+    (pkey-type pkey)))
 
 (defn- check-key-algo
   "Refuse a key that is not the algorithm the caller asked for, as the JDK does
@@ -339,6 +363,237 @@
     (throw (ex-info (str "key algorithm mismatch: expected " want ", got " got)
                     {:expected want :actual got})))
   got)
+
+(defn- check-key-type [factory key]
+  (let [expected (tget factory :key-type)
+        actual (tget key :key-type)]
+    (when (and expected (not= expected actual))
+      (throw (ex-info (str "key type mismatch: expected " expected ", got " actual)
+                      {:expected expected :actual actual}))))
+  key)
+
+(defn key-type
+  "The concrete OpenSSL key type, such as RSA, DSA, EC, Ed25519, or Ed448."
+  [key]
+  (when (table? key)
+    (or (tget key :key-type) (tget key :algo))))
+
+(defn- decoded-key [tag der pkey]
+  (doto (tt tag)
+    (tput! :bytes der)
+    (tput! :algo (pkey-algo pkey))
+    (tput! :key-type (pkey-type pkey))))
+
+(defn decode-public-key
+  "Decode an X.509 SubjectPublicKeyInfo DER value into a tagged PublicKey."
+  [der]
+  (let [der (as-ba der)]
+    (with-der-key c-d2i-pubkey der #(decoded-key :jolt.crypto/public-key der %))))
+
+(defn decode-private-key
+  "Decode a PKCS#8 PrivateKeyInfo DER value into a tagged PrivateKey."
+  [der]
+  (let [der (as-ba der)]
+    (with-der-key c-d2i-privkey der #(decoded-key :jolt.crypto/private-key der %))))
+
+(declare with-mem-bio parse-x509)
+
+;; OpenSSL 3's generic PKCS#8 decoder rejects the pbeWithMD5AndDES-CBC fixture
+;; even though DES-CBC remains available through exported low-level functions.
+;; Support that exact PBE here, without loading the legacy provider; all other
+;; encrypted PKCS#8 inputs continue through the generic decoder first.
+(defn- encrypted-pem? [text]
+  (or (str/includes? text "Proc-Type: 4,ENCRYPTED")
+      (str/includes? text "-----BEGIN ENCRYPTED PRIVATE KEY-----")))
+
+(defn- malformed-pkcs8 []
+  (throw (ex-info "Malformed or unsupported encrypted PKCS#8 key" {})))
+
+(defn- der-node [der offset]
+  (let [size (alength der)]
+    (when (> (+ offset 2) size) (malformed-pkcs8))
+    (let [tag (bit-and (aget der offset) 0xff)
+          first-length (bit-and (aget der (inc offset)) 0xff)
+          length-bytes (if (zero? (bit-and first-length 0x80))
+                         0
+                         (bit-and first-length 0x7f))
+          content-offset (+ offset 2 length-bytes)]
+      ;; 0x80 is BER's indefinite length, which DER forbids.
+      (when (or (= first-length 0x80) (> length-bytes 4) (> content-offset size))
+        (malformed-pkcs8))
+      (let [content-length (if (zero? length-bytes)
+                             first-length
+                             (loop [index 0 length 0]
+                               (if (= index length-bytes)
+                                 length
+                                 (recur (inc index)
+                                        (+ (* 256 length)
+                                           (bit-and (aget der (+ offset 2 index)) 0xff))))))
+            end (+ content-offset content-length)]
+        ;; DER lengths are minimal: long form only from 128, no leading zero byte.
+        (when (and (pos? length-bytes)
+                   (or (< content-length 128)
+                       (zero? (bit-and (aget der (+ offset 2)) 0xff))))
+          (malformed-pkcs8))
+        (when (> end size) (malformed-pkcs8))
+        {:tag tag :start content-offset :end end :next end}))))
+
+(defn- der-child [der parent offset tag]
+  (let [node (der-node der offset)]
+    (when (or (not= tag (:tag node)) (> (:next node) (:end parent)))
+      (malformed-pkcs8))
+    node))
+
+(def ^:private max-pbkdf1-iterations 10000000)
+
+(def ^:private pbe-md5-des-oid
+  [0x2a 0x86 0x48 0x86 0xf7 0x0d 0x01 0x05 0x03])
+
+(defn- der-content= [der node expected]
+  (and (= (count expected) (- (:end node) (:start node)))
+       (= expected (mapv #(bit-and % 0xff)
+                         (ba-window der (:start node) (count expected))))))
+
+(defn- der-positive-int [der node]
+  (let [length (- (:end node) (:start node))]
+    (when-not (<= 1 length 4) (malformed-pkcs8))
+    (when (pos? (bit-and (aget der (:start node)) 0x80)) (malformed-pkcs8))
+    (let [value (loop [offset (:start node) value 0]
+                  (if (= offset (:end node))
+                    value
+                    (recur (inc offset)
+                           (+ (* 256 value) (bit-and (aget der offset) 0xff)))))]
+      (when-not (pos? value) (malformed-pkcs8))
+      value)))
+
+(defn- encrypted-pkcs8-fields [text]
+  (let [body (or (second (re-find #"(?s)-----BEGIN ENCRYPTED PRIVATE KEY-----\s*(.*?)-----END ENCRYPTED PRIVATE KEY-----" text))
+                 (malformed-pkcs8))
+        der (try
+              (codecs/b64->bytes (.getBytes (str/replace body #"\s" "") "UTF-8"))
+              (catch Exception _ (malformed-pkcs8)))
+        outer (der-node der 0)
+        _ (when (or (not= 0x30 (:tag outer)) (not= (alength der) (:next outer)))
+            (malformed-pkcs8))
+        algorithm (der-child der outer (:start outer) 0x30)
+        oid (der-child der algorithm (:start algorithm) 0x06)
+        _ (when-not (der-content= der oid pbe-md5-des-oid)
+            (throw (ex-info "Not a pbeWithMD5AndDES key" {::not-md5-des true})))
+        params (der-child der algorithm (:next oid) 0x30)
+        salt (der-child der params (:start params) 0x04)
+        _ (when-not (= 8 (- (:end salt) (:start salt))) (malformed-pkcs8))
+        iterations-node (der-child der params (:next salt) 0x02)
+        _ (when-not (= (:next iterations-node) (:end params)) (malformed-pkcs8))
+        iterations (der-positive-int der iterations-node)
+        ;; One MD5 call per iteration: a hostile file must not hang the caller.
+        _ (when (> iterations max-pbkdf1-iterations) (malformed-pkcs8))
+        _ (when-not (= (:next params) (:end algorithm)) (malformed-pkcs8))
+        ciphertext (der-child der outer (:next algorithm) 0x04)
+        ciphertext-length (- (:end ciphertext) (:start ciphertext))
+        _ (when (or (zero? ciphertext-length) (not (zero? (mod ciphertext-length 8)))
+                    (not= (:next ciphertext) (:end outer)))
+            (malformed-pkcs8))]
+    {:salt (ba-window der (:start salt) 8)
+     :iterations iterations
+     :ciphertext (ba-window der (:start ciphertext) ciphertext-length)}))
+
+(defn- pbkdf1-md5 [password salt iterations]
+  (loop [iteration 1
+         value (digest c-md5 16 (concat-bas [password salt]))]
+    (if (= iteration iterations)
+      value
+      (recur (inc iteration) (digest c-md5 16 value)))))
+
+(defn- des-cbc-decrypt [key iv ciphertext]
+  (when-not (zero? (mod (alength ciphertext) 8))
+    (throw (ex-info "DES-CBC input must contain complete blocks" {})))
+  (with-ptrs [ciphertext key iv]
+    (fn [input-ptr key-ptr iv-ptr]
+      (let [schedule (ffi/alloc 128)
+            output (ffi/alloc (max 1 (alength ciphertext)))]
+        (try
+          (c-des-set-key-unchecked key-ptr schedule)
+          (c-des-cbc-encrypt input-ptr output (alength ciphertext) schedule iv-ptr 0)
+          (ffi/read-array output (alength ciphertext))
+          (finally
+            (ffi/free schedule)
+            (ffi/free output)))))))
+
+(defn- remove-pkcs7-padding [padded]
+  (let [length (alength padded)]
+    (when (zero? length) (throw (ex-info "Invalid DES-CBC padding" {})))
+    (let [padding (bit-and (aget padded (dec length)) 0xff)]
+      (when (or (zero? padding) (> padding 8) (> padding length))
+        (throw (ex-info "Invalid DES-CBC padding" {})))
+      (dotimes [index padding]
+        (when-not (= padding (bit-and (aget padded (- length 1 index)) 0xff))
+          (throw (ex-info "Invalid DES-CBC padding" {}))))
+      (ba-window padded 0 (- length padding)))))
+
+(defn- decode-pkcs8-md5-des [text passphrase]
+  (let [{:keys [salt iterations ciphertext]} (encrypted-pkcs8-fields text)
+        password (.getBytes passphrase "UTF-8")
+        derived (pbkdf1-md5 password salt iterations)
+        key (ba-window derived 0 8)
+        iv (ba-window derived 8 8)
+        plaintext (remove-pkcs7-padding (des-cbc-decrypt key iv ciphertext))]
+    (decode-private-key plaintext)))
+
+(defn decode-pem-private-key
+  "Decode a traditional or PKCS#8 PEM private key into normalized PKCS#8 DER."
+  [bytes passphrase]
+  (let [bytes (as-ba bytes)
+        text (String. bytes "UTF-8")]
+    (when (and (encrypted-pem? text) (nil? passphrase))
+      (throw (ex-info "Passphrase is mandatory with encrypted keys." {})))
+    (try
+      (with-mem-bio bytes
+        (fn [bio]
+          (let [decode (fn [password]
+                         (c-err-clear)
+                         (let [pkey (c-pem-read-privkey bio ffi/null ffi/null password)]
+                           (when (ffi/null? pkey)
+                             (c-err-clear)
+                             (throw (ex-info "Could not decode PEM private key" {})))
+                           (try
+                             (let [p8 (c-pkey->p8 pkey)]
+                               (when (ffi/null? p8)
+                                 (throw (ex-info "PKCS#8 conversion failed" {})))
+                               (try
+                                 (decode-private-key (der-out c-i2d-p8 p8))
+                                 (finally (c-p8-free p8))))
+                             (finally (c-pkey-free pkey)))))]
+            (if (nil? passphrase)
+              (decode ffi/null)
+              (ffi/with-c-string [password passphrase]
+                (decode password))))))
+      (catch clojure.lang.ExceptionInfo e
+        (if (str/includes? text "-----BEGIN ENCRYPTED PRIVATE KEY-----")
+          ;; Only legacy pbeWithMD5AndDES keys fall back; any other scheme keeps
+          ;; OpenSSL's own failure (a wrong passphrase, say).
+          (try
+            (decode-pkcs8-md5-des text passphrase)
+            (catch clojure.lang.ExceptionInfo fallback
+              (throw (if (::not-md5-des (ex-data fallback)) e fallback))))
+          (throw e))))))
+
+(defn decode-pem-public-key
+  "Decode a PEM SubjectPublicKeyInfo or X.509 certificate public key."
+  [bytes]
+  (let [bytes (as-ba bytes)
+        text (String. bytes "UTF-8")]
+    (if (str/includes? text "-----BEGIN CERTIFICATE-----")
+      (decode-public-key (:der (:public-key (first (parse-x509 bytes)))))
+      (with-mem-bio bytes
+        (fn [bio]
+          (c-err-clear)
+          (let [pkey (c-pem-read-pubkey bio ffi/null ffi/null ffi/null)]
+            (when (ffi/null? pkey)
+              (c-err-clear)
+              (throw (ex-info "Could not decode PEM public key or certificate" {})))
+            (try
+              (decode-public-key (der-out c-i2d-pubkey pkey))
+              (finally (c-pkey-free pkey)))))))))
 
 (defn generate-ec-keypair
   "Generate an EC keypair on `curve`. Returns {:public <X.509 DER> :private <PKCS#8 DER>},
@@ -388,6 +643,7 @@
       (finally (c-bn-free e) (c-rsa-free rsa)))))
 
 (def ^:private nid-ed25519 1087)
+(def ^:private nid-ed448 1088)
 
 (defn generate-ed25519-keypair
   "Generate an Ed25519 keypair. Returns {:public <X.509 DER> :private <PKCS#8 DER>},
@@ -411,6 +667,339 @@
           (finally (ffi/free holder))))
       (finally (c-pkey-ctx-free ctx)))))
 
+;; --- JWK key parameter boundary ---------------------------------------------
+;; These functions are public only so the jwk namespaces can share the existing
+;; OpenSSL shim. Their values contain bytes, strings, and tagged DER keys only.
+(defn- bn-from-unsigned [data]
+  (let [data (as-ba data)]
+    (with-ptrs [data]
+      (fn [ptr]
+        (let [bn (c-bn-bin2bn ptr (alength data) ffi/null)]
+          (when (ffi/null? bn)
+            (throw (ex-info "OpenSSL BIGNUM initialization failed" {})))
+          bn)))))
+
+(defn- bn->unsigned [bn]
+  (when-not (ffi/null? bn)
+    (let [length (quot (+ (c-bn-num-bits bn) 7) 8)
+          output (ffi/alloc (max 1 length))]
+      (try
+        (let [written (c-bn-bn2bin bn output)]
+          (when-not (= length written)
+            (throw (ex-info "OpenSSL BIGNUM encoding failed"
+                            {:expected length :actual written})))
+          (ffi/read-array output length))
+        (finally (ffi/free output))))))
+
+(defn- rsa-set0! [rsa setter values]
+  (let [owned (atom [])]
+    (try
+      (let [args (mapv (fn [value]
+                         (if (nil? value)
+                           ffi/null
+                           (let [bn (bn-from-unsigned value)]
+                             (swap! owned conj bn)
+                             bn)))
+                       values)]
+        (when-not (= 1 (apply setter rsa args))
+          (throw (ex-info "OpenSSL RSA parameter initialization failed" {}))))
+      (catch Exception e
+        (doseq [bn @owned] (c-bn-free bn))
+        (c-err-clear)
+        (throw e)))))
+
+(defn- check-native-key [check-fn key algorithm]
+  (when-not (= 1 (check-fn key))
+    (c-err-clear)
+    (throw (ex-info (str "Invalid " algorithm " key parameters") {}))))
+
+(defn rsa-public-from-parameters
+  "Build a tagged RSA PublicKey from unsigned n and e bytes. JWK-internal."
+  [n e]
+  (let [rsa (c-rsa-new)]
+    (when (ffi/null? rsa)
+      (throw (ex-info "OpenSSL RSA allocation failed" {})))
+    (try
+      (rsa-set0! rsa c-rsa-set0-key [n e nil])
+      (let [pkey (c-pkey-new)]
+        (when (ffi/null? pkey)
+          (throw (ex-info "OpenSSL EVP_PKEY allocation failed" {})))
+        (try
+          (when-not (= 1 (c-pkey-set-rsa pkey rsa))
+            (throw (ex-info "OpenSSL RSA key wrapping failed" {})))
+          (decode-public-key (der-out c-i2d-pubkey pkey))
+          (finally (c-pkey-free pkey))))
+      (finally (c-rsa-free rsa)))))
+
+(defn rsa-private-from-parameters
+  "Build a tagged RSA PrivateKey from a complete unsigned parameter map."
+  [{:keys [n e d p q dp dq qi]}]
+  (let [rsa (c-rsa-new)]
+    (when (ffi/null? rsa)
+      (throw (ex-info "OpenSSL RSA allocation failed" {})))
+    (try
+      (rsa-set0! rsa c-rsa-set0-key [n e d])
+      (rsa-set0! rsa c-rsa-set0-factors [p q])
+      (rsa-set0! rsa c-rsa-set0-crt [dp dq qi])
+      (check-native-key c-rsa-check rsa "RSA")
+      (let [pkey (c-pkey-new)]
+        (when (ffi/null? pkey)
+          (throw (ex-info "OpenSSL EVP_PKEY allocation failed" {})))
+        (try
+          (when-not (= 1 (c-pkey-set-rsa pkey rsa))
+            (throw (ex-info "OpenSSL RSA key wrapping failed" {})))
+          (let [p8 (c-pkey->p8 pkey)]
+            (when (ffi/null? p8)
+              (c-err-clear)
+              (throw (ex-info "OpenSSL RSA PKCS#8 encoding failed" {})))
+            (try
+              (decode-private-key (der-out c-i2d-p8 p8))
+              (finally (c-p8-free p8))))
+          (finally (c-pkey-free pkey))))
+      (finally (c-rsa-free rsa)))))
+
+(defn- with-rsa-parameters [key private? f]
+  (with-der-key (if private? c-d2i-privkey c-d2i-pubkey) (tget key :bytes)
+    (fn [pkey]
+      (let [rsa (c-pkey-get-rsa pkey)]
+        (when (ffi/null? rsa)
+          (c-err-clear)
+          (throw (ex-info "Expected an RSA key" {})))
+        (try
+          (let [holders (ffi/alloc (* 8 ptr-size))]
+            (try
+              (c-rsa-get0-key rsa holders (+ holders ptr-size) (+ holders (* 2 ptr-size)))
+              (c-rsa-get0-factors rsa (+ holders (* 3 ptr-size)) (+ holders (* 4 ptr-size)))
+              (c-rsa-get0-crt rsa (+ holders (* 5 ptr-size)) (+ holders (* 6 ptr-size))
+                              (+ holders (* 7 ptr-size)))
+              (f (bn->unsigned (ffi/read holders :pointer 0))
+                 (bn->unsigned (ffi/read holders :pointer ptr-size))
+                 (bn->unsigned (ffi/read holders :pointer (* 2 ptr-size)))
+                 (bn->unsigned (ffi/read holders :pointer (* 3 ptr-size)))
+                 (bn->unsigned (ffi/read holders :pointer (* 4 ptr-size)))
+                 (bn->unsigned (ffi/read holders :pointer (* 5 ptr-size)))
+                 (bn->unsigned (ffi/read holders :pointer (* 6 ptr-size)))
+                 (bn->unsigned (ffi/read holders :pointer (* 7 ptr-size))))
+              (finally (ffi/free holders))))
+          (finally (c-rsa-free rsa)))))))
+
+(defn rsa-public-parameters
+  "Return {:n bytes :e bytes} from a tagged RSA PublicKey. JWK-internal."
+  [key]
+  (with-rsa-parameters key false
+    (fn [n e _ _ _ _ _ _] {:n n :e e})))
+
+(defn rsa-private-parameters
+  "Return unsigned RSA key and CRT bytes from a tagged RSA PrivateKey."
+  [key]
+  (with-rsa-parameters key true
+    (fn [n e d p q dp dq qi]
+      {:n n :e e :d d :p p :q q :dp dp :dq dq :qi qi})))
+
+(defn- ec-set-public! [eck x y]
+  (let [group (c-ec-get0-group eck)
+        point (c-ec-point-new group)]
+    (when (ffi/null? point)
+      (throw (ex-info "OpenSSL EC point allocation failed" {})))
+    (let [xbn (atom nil)
+          ybn (atom nil)]
+      (try
+        (reset! xbn (bn-from-unsigned x))
+        (reset! ybn (bn-from-unsigned y))
+        (when-not (= 1 (c-ec-point-set group point @xbn @ybn ffi/null))
+          (c-err-clear)
+          (throw (ex-info "OpenSSL EC coordinate initialization failed" {})))
+        (when-not (= 1 (c-ec-set-public eck point))
+          (c-err-clear)
+          (throw (ex-info "OpenSSL EC public key initialization failed" {})))
+        (finally
+          (c-ec-point-free point)
+          (when @xbn (c-bn-free @xbn))
+          (when @ybn (c-bn-free @ybn)))))))
+
+(defn- ec-pkey->der [eck private?]
+  (let [pkey (c-pkey-new)]
+    (when (ffi/null? pkey)
+      (throw (ex-info "OpenSSL EVP_PKEY allocation failed" {})))
+    (try
+      (when-not (= 1 (c-pkey-set-ec pkey eck))
+        (throw (ex-info "OpenSSL EC key wrapping failed" {})))
+      (if private?
+        (let [p8 (c-pkey->p8 pkey)]
+          (when (ffi/null? p8)
+            (c-err-clear)
+            (throw (ex-info "OpenSSL EC PKCS#8 encoding failed" {})))
+          (try
+            (decode-private-key (der-out c-i2d-p8 p8))
+            (finally (c-p8-free p8))))
+        (decode-public-key (der-out c-i2d-pubkey pkey)))
+      (finally (c-pkey-free pkey)))))
+
+(defn ec-public-from-parameters
+  "Build a tagged EC PublicKey from a JWK curve and unsigned x/y bytes."
+  [curve x y]
+  (let [eck (c-ec-new-curve (curve-nid curve))]
+    (when (ffi/null? eck)
+      (throw (ex-info (str "Unsupported EC curve: " curve) {:curve curve})))
+    (try
+      (ec-set-public! eck x y)
+      (check-native-key c-ec-check eck "EC")
+      (ec-pkey->der eck false)
+      (finally (c-ec-free eck)))))
+
+(defn ec-private-from-parameters
+  "Build a tagged EC PrivateKey from a JWK curve and unsigned d/x/y bytes."
+  [curve d x y]
+  (let [eck (c-ec-new-curve (curve-nid curve))]
+    (when (ffi/null? eck)
+      (throw (ex-info (str "Unsupported EC curve: " curve) {:curve curve})))
+    (try
+      (ec-set-public! eck x y)
+      (let [dbn (bn-from-unsigned d)]
+        (try
+          (when-not (= 1 (c-ec-set-private eck dbn))
+            (c-err-clear)
+            (throw (ex-info "OpenSSL EC private key initialization failed" {})))
+          (finally (c-bn-free dbn))))
+      (check-native-key c-ec-check eck "EC")
+      (ec-pkey->der eck true)
+      (finally (c-ec-free eck)))))
+
+(def ^:private jwk-curves
+  {415 ["P-256" 32] 714 ["secp256k1" 32]
+   715 ["P-384" 48] 716 ["P-521" 66]})
+
+(defn- ec-point-fields [eck derive?]
+  (let [group (c-ec-get0-group eck)
+        nid (c-ec-group-nid group)
+        [curve width] (or (get jwk-curves nid)
+                          (throw (ex-info "Unsupported EC curve" {:nid nid})))
+        existing (c-ec-get0-public eck)
+        derive (and (ffi/null? existing) derive?)
+        point (if derive (c-ec-point-new group) existing)]
+    (when (ffi/null? point)
+      (throw (ex-info "EC key has no public point" {})))
+    (try
+      (when derive
+        (when-not (= 1 (c-ec-point-mul group point ffi/null ffi/null
+                                       (c-ec-get0-private eck) ffi/null))
+          (c-err-clear)
+          (throw (ex-info "OpenSSL EC public key derivation failed" {}))))
+      (let [expected (inc (* 2 width))
+            actual (c-ec-point-octets group point 4 ffi/null 0 ffi/null)]
+        (when-not (= expected actual)
+          (throw (ex-info "Unexpected EC point width" {:expected expected :actual actual})))
+        (let [buffer (ffi/alloc actual)]
+          (try
+            (when-not (= actual (c-ec-point-octets group point 4 buffer actual ffi/null))
+              (throw (ex-info "OpenSSL EC point encoding failed" {})))
+            (let [encoded (ffi/read-array buffer actual)]
+              {:crv curve
+               :x (ba-window encoded 1 width)
+               :y (ba-window encoded (inc width) width)})
+            (finally (ffi/free buffer)))))
+      (finally
+        (when derive (c-ec-point-free point))))))
+
+(defn- with-ec-parameters [key private? f]
+  (with-der-key (if private? c-d2i-privkey c-d2i-pubkey) (tget key :bytes)
+    (fn [pkey]
+      (let [eck (c-pkey-get-ec pkey)]
+        (when (ffi/null? eck)
+          (c-err-clear)
+          (throw (ex-info "Expected an EC key" {})))
+        (try (f eck) (finally (c-ec-free eck)))))))
+
+(defn ec-public-parameters
+  "Return {:crv string :x bytes :y bytes} from a tagged EC PublicKey."
+  [key]
+  (with-ec-parameters key false #(ec-point-fields % false)))
+
+(defn ec-private-parameters
+  "Return curve/public coordinates and unsigned d bytes from an EC PrivateKey."
+  [key]
+  (with-ec-parameters key true
+    (fn [eck]
+      (let [private (c-ec-get0-private eck)]
+        (when (ffi/null? private)
+          (throw (ex-info "EC key has no private scalar" {})))
+        (assoc (ec-point-fields eck true)
+               :d (bn->unsigned private))))))
+
+(def ^:private ed-curves
+  {"Ed25519" [nid-ed25519 32]
+   "Ed448" [nid-ed448 57]})
+
+(defn- ed-from-raw [curve raw private?]
+  (let [raw (as-ba raw)
+        [nid length] (or (get ed-curves curve)
+                         (throw (ex-info (str "Unsupported EdDSA curve: " curve)
+                                         {:curve curve})))]
+    (when-not (= length (alength raw))
+      (throw (ex-info (str curve " raw keys must be " length " bytes")
+                      {:curve curve :expected length :actual (alength raw)})))
+    (with-ptrs [raw]
+      (fn [ptr]
+        (let [pkey ((if private? c-pkey-new-raw-private c-pkey-new-raw-public)
+                    nid ffi/null ptr length)]
+          (when (ffi/null? pkey)
+            (c-err-clear)
+            (throw (ex-info (str "OpenSSL " curve " raw key initialization failed") {})))
+          (try
+            (if private?
+              (let [p8 (c-pkey->p8 pkey)]
+                (when (ffi/null? p8)
+                  (throw (ex-info (str curve " PKCS#8 encoding failed") {})))
+                (try
+                  (decode-private-key (der-out c-i2d-p8 p8))
+                  (finally (c-p8-free p8))))
+              (decode-public-key (der-out c-i2d-pubkey pkey)))
+            (finally (c-pkey-free pkey))))))))
+
+(defn ed-private-from-raw
+  "Build a tagged Ed25519/Ed448 PrivateKey from its raw private bytes."
+  [curve raw]
+  (ed-from-raw curve raw true))
+
+(defn ed-public-from-raw
+  "Build a tagged Ed25519/Ed448 PublicKey from its raw public bytes."
+  [curve raw]
+  (ed-from-raw curve raw false))
+
+(defn- ed-raw-from-key [key private? raw-kind]
+  (with-der-key (if private? c-d2i-privkey c-d2i-pubkey) (tget key :bytes)
+    (fn [pkey]
+      (let [length-holder (ffi/alloc 8)]
+        (try
+          (let [getter (if (= :private raw-kind) c-pkey-get-raw-private c-pkey-get-raw-public)]
+            (when-not (= 1 (getter pkey ffi/null length-holder))
+              (c-err-clear)
+              (throw (ex-info "OpenSSL raw EdDSA key sizing failed" {})))
+            (let [length (ffi/read length-holder :size_t)
+                  buffer (ffi/alloc length)]
+              (try
+                (when-not (= 1 (getter pkey buffer length-holder))
+                  (c-err-clear)
+                  (throw (ex-info "OpenSSL raw EdDSA key extraction failed" {})))
+                (ffi/read-array buffer (ffi/read length-holder :size_t))
+                (finally (ffi/free buffer)))))
+          (finally (ffi/free length-holder)))))))
+
+(defn ed-private-bytes
+  "Extract raw private bytes from a tagged EdDSA PrivateKey. JWK-internal."
+  [key]
+  (ed-raw-from-key key true :private))
+
+(defn ed-public-bytes
+  "Extract raw public bytes from a tagged EdDSA PublicKey. JWK-internal."
+  [key]
+  (ed-raw-from-key key false :public))
+
+(defn ed-derived-public-bytes
+  "Derive raw public bytes from a tagged EdDSA PrivateKey. JWK-internal."
+  [key]
+  (ed-raw-from-key key true :public))
+
 (defn- generate-keypair-for
   "Draw a keypair from a KeyPairGenerator shim's state: {:public :private
   :algo}, ready for the keypair shim."
@@ -420,60 +1009,104 @@
                                    "EdDSA" (generate-ed25519-keypair)
                                    (generate-ec-keypair (tget self :curve)))]
     (doto (tt :jolt.crypto/keypair)
-      (tput! :public public) (tput! :private private) (tput! :algo (tget self :algo)))))
+      (tput! :public public)
+      (tput! :private private)
+      (tput! :algo (tget self :algo))
+      (tput! :key-type (if (= "EdDSA" (tget self :algo)) "Ed25519" (tget self :algo))))))
+
+(def ^:private rsa-pkcs1-pss-padding 6)
+(def ^:private rsa-pss-saltlen-digest -1)
+
+(defn- configure-pss! [pctx md-fn]
+  (when (ffi/null? pctx)
+    (throw (ex-info "RSA-PSS context initialization failed" {})))
+  (when (not= 1 (c-rsa-padding pctx rsa-pkcs1-pss-padding))
+    (throw (ex-info "RSA-PSS padding setup failed" {})))
+  (when (not= 1 (c-rsa-mgf1-md pctx (md-fn)))
+    (throw (ex-info "RSA-PSS MGF1 setup failed" {})))
+  (when (not= 1 (c-rsa-pss-saltlen pctx rsa-pss-saltlen-digest))
+    (throw (ex-info "RSA-PSS salt length setup failed" {}))))
+
+(defn- check-signature-options [pkey want-algo options]
+  (check-key-algo want-algo (pkey-algo pkey))
+  (when-let [want-type (:key-type options)]
+    (check-key-algo want-type (pkey-type pkey))))
 
 (defn pkey-sign
-  "Sign `data` with a PKCS#8 DER private key, digesting with md-fn (nil for
-  Ed25519, which hashes internally). The result is what Signature.sign returns
-  on the JVM for that key: a DER-encoded ECDSA SEQUENCE of r and s for an EC
-  key, the raw PKCS#1 v1.5 ciphertext for RSA, the 64-byte RFC 8032 signature
-  for Ed25519.
-  EVP picks the primitive from the key itself, so the same call serves both —
-  and so `want-algo`, when given, is what stops a key of the other algorithm
-  producing a signature the named algorithm did not ask for."
-  ([md-fn priv-der data] (pkey-sign md-fn priv-der data nil))
-  ([md-fn priv-der data want-algo]
+  "Sign `data` with a PKCS#8 DER private key. A nil digest selects PureEdDSA's
+  one-shot operation for Ed25519 and Ed448. Options may select RSA-PSS (with
+  MGF1 and salt length both tied to the message digest) and a concrete EdDSA
+  key type. Native contexts are released on every exit path."
+  ([md-fn priv-der data] (pkey-sign md-fn priv-der data nil nil))
+  ([md-fn priv-der data want-algo] (pkey-sign md-fn priv-der data want-algo nil))
+  ([md-fn priv-der data want-algo options]
    (with-der-key c-d2i-privkey priv-der
      (fn [pkey]
-       (check-key-algo want-algo (key-algo priv-der pkey))
-       (let [data (as-ba data) dn (alength data)
-             ctx (c-md-ctx-new) dp (ffi/alloc (max 1 dn)) lenp (ffi/alloc 8)]
+       (check-signature-options pkey want-algo options)
+       (let [data (as-ba data) dn (alength data) ctx (c-md-ctx-new)]
+         (when (ffi/null? ctx)
+           (throw (ex-info "signature context allocation failed" {})))
          (try
-           (ffi/write-array dp data)
-           (when (not= 1 (c-dgst-sign-init ctx ffi/null (if md-fn (md-fn) ffi/null) ffi/null pkey))
-             (throw (ex-info "signature init failed" {})))
-           ;; a null signature buffer asks for the maximum size rather than signing
-           (ffi/write lenp :size_t 0 0)
-           (when (not= 1 (c-dgst-sign ctx ffi/null lenp dp dn))
-             (throw (ex-info "signature sizing failed" {})))
-           (let [sigp (ffi/alloc (ffi/read lenp :size_t))]
-             (try
-               (when (not= 1 (c-dgst-sign ctx sigp lenp dp dn))
-                 (throw (ex-info "signing failed" {})))
-               (ffi/read-array sigp (ffi/read lenp :size_t))
-               (finally (ffi/free sigp))))
-           (finally (c-md-ctx-free ctx) (ffi/free dp) (ffi/free lenp))))))))
+           (with-ptrs [data]
+             (fn [dp]
+               (let [lenp (ffi/alloc 8)]
+                 (try
+                   (let [pctxp (ffi/alloc ptr-size)]
+                     (try
+                       (ffi/write pctxp :pointer ffi/null 0)
+                       (when (not= 1 (c-dgst-sign-init ctx pctxp (if md-fn (md-fn) ffi/null) ffi/null pkey))
+                         (throw (ex-info "signature init failed" {})))
+                       (when (:pss options)
+                         (configure-pss! (ffi/read pctxp :pointer) md-fn))
+                       ;; a null signature buffer asks for the maximum size rather than signing
+                       (ffi/write lenp :size_t 0 0)
+                       (when (not= 1 (c-dgst-sign ctx ffi/null lenp dp dn))
+                         (throw (ex-info "signature sizing failed" {})))
+                       (let [sigp (ffi/alloc (ffi/read lenp :size_t))]
+                         (try
+                           (when (not= 1 (c-dgst-sign ctx sigp lenp dp dn))
+                             (throw (ex-info "signing failed" {})))
+                           (ffi/read-array sigp (ffi/read lenp :size_t))
+                           (finally (ffi/free sigp))))
+                       (finally
+                         ;; DigestSignInit transferred pctx ownership to ctx.
+                         (ffi/free pctxp))))
+                   (finally (ffi/free lenp))))))
+           (finally (c-md-ctx-free ctx))))))))
 
 (defn pkey-verify
-  "Verify a signature over `data` against an X.509 DER public key, digesting
-  with md-fn (nil for Ed25519). The signature format is the key algorithm's
-  (DER ECDSA r/s, raw PKCS#1 v1.5 RSA, 64-byte Ed25519); `want-algo`, when
-  given, holds the key to that algorithm."
-  ([md-fn pub-der data sig] (pkey-verify md-fn pub-der data sig nil))
-  ([md-fn pub-der data sig want-algo]
+  "Verify a signature over `data` against an X.509 DER public key. Ordinary
+  invalid signatures return false. Options have the same PSS and concrete-key
+  meaning as pkey-sign, and native resources are released on every exit path."
+  ([md-fn pub-der data sig] (pkey-verify md-fn pub-der data sig nil nil))
+  ([md-fn pub-der data sig want-algo] (pkey-verify md-fn pub-der data sig want-algo nil))
+  ([md-fn pub-der data sig want-algo options]
    (with-der-key c-d2i-pubkey pub-der
      (fn [pkey]
-       (check-key-algo want-algo (key-algo pub-der pkey))
+       (check-signature-options pkey want-algo options)
        (let [data (as-ba data) sig (as-ba sig) dn (alength data) sn (alength sig)
-             ctx (c-md-ctx-new) dp (ffi/alloc (max 1 dn)) sp (ffi/alloc (max 1 sn))]
+             ctx (c-md-ctx-new)]
+         (when (ffi/null? ctx)
+           (throw (ex-info "verification context allocation failed" {})))
          (try
-           (ffi/write-array dp data)
-           (ffi/write-array sp sig)
-           (when (not= 1 (c-dgst-verify-init ctx ffi/null (if md-fn (md-fn) ffi/null) ffi/null pkey))
-             (throw (ex-info "verification init failed" {})))
-           ;; a bad signature is a false, not a throw: EVP reports both the same way
-           (= 1 (c-dgst-verify ctx sp sn dp dn))
-           (finally (c-md-ctx-free ctx) (ffi/free dp) (ffi/free sp))))))))
+           (with-ptrs [data sig]
+             (fn [dp sp]
+               (let [pctxp (ffi/alloc ptr-size)]
+                 (try
+                   (ffi/write pctxp :pointer ffi/null 0)
+                   (when (not= 1 (c-dgst-verify-init ctx pctxp (if md-fn (md-fn) ffi/null) ffi/null pkey))
+                     (throw (ex-info "verification init failed" {})))
+                   (when (:pss options)
+                     (configure-pss! (ffi/read pctxp :pointer) md-fn))
+                   ;; a bad signature is a false, not a throw
+                   (let [result (c-dgst-verify ctx sp sn dp dn)]
+                     (when (not= 1 result)
+                       (c-err-clear))
+                     (= 1 result))
+                   (finally
+                     ;; DigestVerifyInit transferred pctx ownership to ctx.
+                     (ffi/free pctxp))))))
+           (finally (c-md-ctx-free ctx))))))))
 
 ;; --- X.509 certificates ------------------------------------------------------
 (defn- with-mem-bio
@@ -599,6 +1232,7 @@
           (let [alg (ffi/read holder :pointer 0)
                 sn (if (ffi/null? alg) "" (ffi/ptr->string (c-obj-nid2sn (c-obj-obj2nid alg))))]
             {:algorithm (get key-alg-names sn sn)
+             :key-type (pkey-type pkey)
              :der (der-out c-i2d-pubkey pkey)})
           (finally (ffi/free holder))))
       (finally (c-pkey-free pkey)))))
@@ -672,8 +1306,15 @@
     "SHA256WITHRSA"   [c-sha256 "RSA"]
     "SHA224WITHRSA"   [c-sha224 "RSA"]
     "SHA1WITHRSA"     [c-sha1   "RSA"]
-    ;; PureEdDSA hashes internally: no digest, one-shot over the whole message
-    "ED25519"         [nil "EdDSA"]
+    ;; Bouncy Castle's SHA*withRSAandMGF1 uses MGF1 with the same digest and a
+    ;; digest-length salt. OpenSSL needs all three PSS controls set explicitly.
+    "SHA512WITHRSAANDMGF1" [c-sha512 "RSA" {:pss true}]
+    "SHA384WITHRSAANDMGF1" [c-sha384 "RSA" {:pss true}]
+    "SHA256WITHRSAANDMGF1" [c-sha256 "RSA" {:pss true}]
+    ;; PureEdDSA hashes internally: no digest, one-shot over the whole message.
+    ;; Generic EdDSA accepts either curve; concrete names enforce theirs.
+    "ED25519"         [nil "EdDSA" {:key-type "Ed25519"}]
+    "ED448"           [nil "EdDSA" {:key-type "Ed448"}]
     "EDDSA"           [nil "EdDSA"]
     (throw (ex-info (str "unsupported Signature algorithm: " algo) {:algo algo}))))
 
@@ -713,6 +1354,30 @@
 
 ;; --- X.509 shim objects -----------------------------------------------------
 (defn- x509-cert? [x] (and (table? x) (= :jolt.crypto/x509-cert (tget x :jolt/type))))
+(defn- x509-public-key? [x] (and (table? x) (= :jolt.crypto/public-key (tget x :jolt/type))))
+
+(defn certificate-subject
+  "Return an X.509 subject in certificate RDN order, as Buddy's X500Name does."
+  [cert]
+  (when-not (x509-cert? cert)
+    (throw (ex-info "Unknown certificate type" {:kind (class cert)})))
+  (str/join "," (reverse (split-rdns (tget cert :subject)))))
+
+(defn verify-certificate-signature
+  "Verify a parsed X.509 value with a tagged public key or issuer certificate."
+  [cert public-key]
+  (when-not (x509-cert? cert)
+    (throw (ex-info "Unknown certificate type" {:kind (class cert)})))
+  (cond
+    (x509-public-key? public-key)
+    (openssl/x509-verify (tget cert :der) (tget public-key :bytes))
+
+    (x509-cert? public-key)
+    (openssl/x509-verify (tget cert :der) (:der (tget public-key :public-key)))
+
+    :else
+    (throw (ex-info "Unknown public key type" {:kind (class public-key)}))))
+
 (defn- x500-principal? [x] (and (table? x) (= :jolt.crypto/x500-principal (tget x :jolt/type))))
 (defn- x500-name? [x] (and (table? x) (= :jolt.crypto/x500-name (tget x :jolt/type))))
 (defn- ba= [a b] (and (bytes? a) (bytes? b) (= (seq a) (seq b))))
@@ -960,16 +1625,18 @@
   (__register-class-methods! :jolt.crypto/keypair
     {"getPublic" (fn [self] (doto (tt :jolt.crypto/public-key)
                               (tput! :bytes (tget self :public))
-                              (tput! :algo (tget self :algo))))
+                              (tput! :algo (tget self :algo))
+                              (tput! :key-type (tget self :key-type))))
      "getPrivate" (fn [self] (doto (tt :jolt.crypto/private-key)
                                (tput! :bytes (tget self :private))
-                               (tput! :algo (tget self :algo))))})
+                               (tput! :algo (tget self :algo))
+                               (tput! :key-type (tget self :key-type))))})
 
   ;; java.security.KeyFactory — DER key spec in, key object out. Decoding once
   ;; here means malformed bytes are rejected at generate* time, as on the JVM,
-  ;; rather than surfacing later as a mysterious verification failure. d2i
-  ;; accepts either algorithm's DER, so the parsed key's own NID — not the
-  ;; algorithm the factory was asked for — is what the key gets stamped with,
+  ;; rather than surfacing later as a mysterious verification failure. The
+  ;; decoded key's own OpenSSL type — not the algorithm the factory was asked
+  ;; for or a filename — is what the key gets stamped with,
   ;; and a disagreement between the two is an error, as it is on the JVM.
   (doseq [nm ["KeyFactory" "java.security.KeyFactory"]]
     (__register-class-statics! nm
@@ -977,21 +1644,22 @@
                        (case (str/upper-case (str algo))
                          "EC" (doto (tt :jolt.crypto/key-factory) (tput! :algo "EC"))
                          "RSA" (doto (tt :jolt.crypto/key-factory) (tput! :algo "RSA"))
-                         ("ED25519" "EDDSA") (doto (tt :jolt.crypto/key-factory) (tput! :algo "EdDSA"))
+                         "DSA" (doto (tt :jolt.crypto/key-factory) (tput! :algo "DSA"))
+                         "ED25519" (doto (tt :jolt.crypto/key-factory)
+                                     (tput! :algo "EdDSA") (tput! :key-type "Ed25519"))
+                         "EDDSA" (doto (tt :jolt.crypto/key-factory) (tput! :algo "EdDSA"))
+                         "ED448" (doto (tt :jolt.crypto/key-factory)
+                                   (tput! :algo "EdDSA") (tput! :key-type "Ed448"))
                          (throw (ex-info (str "unsupported KeyFactory algorithm: " algo) {:algo algo}))))}))
   (__register-class-methods! :jolt.crypto/key-factory
     {"generatePublic" (fn [self spec]
-                        (let [der (->ba spec)
-                              algo (with-der-key c-d2i-pubkey der #(key-algo der %))]
-                          (check-key-algo (tget self :algo) algo)
-                          (doto (tt :jolt.crypto/public-key)
-                            (tput! :bytes der) (tput! :algo (or algo (tget self :algo))))))
+                        (let [key (decode-public-key (->ba spec))]
+                          (check-key-algo (tget self :algo) (tget key :algo))
+                          (check-key-type self key)))
      "generatePrivate" (fn [self spec]
-                         (let [der (->ba spec)
-                               algo (with-der-key c-d2i-privkey der #(key-algo der %))]
-                           (check-key-algo (tget self :algo) algo)
-                           (doto (tt :jolt.crypto/private-key)
-                             (tput! :bytes der) (tput! :algo (or algo (tget self :algo))))))
+                         (let [key (decode-private-key (->ba spec))]
+                           (check-key-algo (tget self :algo) (tget key :algo))
+                           (check-key-type self key)))
      "getAlgorithm" (fn [self] (tget self :algo))})
 
   ;; java.security.Signature — stateful like Cipher: init picks key and
@@ -999,10 +1667,11 @@
   (doseq [nm ["Signature" "java.security.Signature"]]
     (__register-class-statics! nm
       {"getInstance" (fn [algo & _]
-                       (let [[md key-algo] (signature-spec algo)]
+                       (let [[md key-algo options] (signature-spec algo)]
                          (doto (tt :jolt.crypto/signature)
                            (tput! :md md)
                            (tput! :key-algo key-algo)
+                           (tput! :options options)
                            (tput! :algo (str algo))
                            (tput! :acc []))))}))
   (__register-class-methods! :jolt.crypto/signature
@@ -1014,12 +1683,14 @@
      "sign" (fn [self & _]
               (let [body (concat-bas (tget self :acc))]
                 (tput! self :acc [])
-                (pkey-sign (tget self :md) (tget self :key) body (tget self :key-algo))))
+                (pkey-sign (tget self :md) (tget self :key) body
+                           (tget self :key-algo) (tget self :options))))
      "verify" (fn [self sig & more]
                 (let [body (concat-bas (tget self :acc))
                       sig (if (= 2 (count more)) (ba-window sig (first more) (second more)) sig)]
                   (tput! self :acc [])
-                  (pkey-verify (tget self :md) (tget self :key) body sig (tget self :key-algo))))
+                  (pkey-verify (tget self :md) (tget self :key) body sig
+                               (tget self :key-algo) (tget self :options))))
      "getAlgorithm" (fn [self] (tget self :algo))})
 
   ;; --- X.509 certificates ---------------------------------------------------
@@ -1076,8 +1747,11 @@
      "getSigAlgName" (fn [self] (let [oid (tget self :sig-alg-oid)] (get sig-alg-names oid oid)))
      ;; the same PublicKey KeyFactory builds, so it initVerify's a Signature
      "getPublicKey" (fn [self]
-                      (let [{:keys [algorithm der]} (tget self :public-key)]
-                        (doto (tt :jolt.crypto/public-key) (tput! :bytes der) (tput! :algo algorithm))))
+                      (let [{:keys [algorithm key-type der]} (tget self :public-key)]
+                        (doto (tt :jolt.crypto/public-key)
+                          (tput! :bytes der)
+                          (tput! :algo algorithm)
+                          (tput! :key-type key-type))))
      ;; checkValidity() is now; checkValidity(Date) is that instant
      "checkValidity" (fn [self & [date]]
                        (let [now (if date (.getTime date) (System/currentTimeMillis))

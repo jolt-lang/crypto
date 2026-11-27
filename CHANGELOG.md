@@ -9,6 +9,24 @@ matching `:git/sha`.
 
 ## [Unreleased]
 
+### Added
+
+- **Buddy-compatible OpenSSL APIs under `jolt.crypto`.** Ported byte and codec
+  helpers; MD5, SHA-1, SHA-256/384/512, SHA-3, BLAKE2b-512 and RIPEMD-160
+  hashes; HMAC and AES-Poly1305; HKDF, KDF1/KDF2, counter/feedback/double-pipeline KDF and
+  PBKDF2; AES ECB/CBC/CTR/OFB/GCM, original ChaCha, and authenticated
+  AES-CBC-HMAC-SHA2/AES-GCM; RSA PKCS#1/PSS, ECDSA and EdDSA signatures; PEM,
+  JWK and RFC 3394 key wrapping; X.509 helpers; ECDSA transcoding; and DEFLATE.
+  Buddy Core's tests and fixtures were ported with the implementation.
+- `NOTICE` and `LICENSE-buddy-core` preserve Buddy Core's Apache 2.0
+  attribution and the Nimbus JOSE + JWT attribution for ECDSA transcoding.
+- The README maps every delivered namespace, lists supported algorithms and
+  explicit deferrals, and documents OpenSSL 3 requirements, native cipher
+  cleanup, ignored signature `:prng`, and bounded n/e/d-only RSA recovery.
+- Tiger, Whirlpool, RIPEMD-128/256/320, BLAKE3, Skein, BLAKE2b-128/256,
+  Twofish, Serpent, and their dependent variants are explicitly deferred rather
+  than approximated with incompatible implementations.
+
 ## [0.3.0] - 2026-11-26
 
 ### Added
