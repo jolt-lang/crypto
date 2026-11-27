@@ -12,13 +12,18 @@
 ;; See the License for the specific language governing permissions and
 ;; limitations under the License.
 ;;
-;; Modified in 2026 for Jolt: retained the PEM and AES-wrap API using tagged
-;; keys and OpenSSL; JWK conversion is implemented separately.
+;; Modified in 2026 for Jolt: retained the PEM, JWK, and AES-wrap API using
+;; tagged keys and OpenSSL.
 
 (ns jolt.crypto.keys
-  "PEM key constructors, key predicates, and AES key wrapping."
+  "PEM and JWK key conversion, key predicates, and AES key wrapping."
   (:require [jolt.crypto.internal.openssl :as openssl]
-            [jolt.crypto.keys.pem :as pem])
+            [jolt.crypto.keys.pem :as pem]
+            [jolt.crypto.keys.jwk.proto :as jwk]
+            [jolt.crypto.keys.jwk.okp]
+            [jolt.crypto.keys.jwk.ec]
+            [jolt.crypto.keys.jwk.rsa]
+            [jolt.crypto.keys.jwk.eddsa])
   (:import java.io.StringReader))
 
 (defn private-key
@@ -46,6 +51,31 @@
   ([keydata passphrase]
    (with-open [reader (StringReader. ^String keydata)]
      (pem/read-privkey reader passphrase))))
+
+(defn jwk->private-key
+  "Convert a JWK map to a tagged Jolt PrivateKey."
+  [value]
+  (jwk/jwk->private-key value))
+
+(defn jwk->public-key
+  "Convert a JWK map to a tagged Jolt PublicKey."
+  [value]
+  (jwk/jwk->public-key value))
+
+(defn jwk
+  "Convert tagged Jolt private and public keys to a JWK map."
+  [private public]
+  (jwk/jwk private public))
+
+(defn public-key->jwk
+  "Convert a tagged Jolt PublicKey to a JWK map."
+  [public]
+  (jwk/public-key->jwk public))
+
+(defn jwk-thumbprint
+  "Calculate the RFC 7638 SHA-256 thumbprint of a JWK."
+  [value]
+  (jwk/thumbprint value))
 
 (defn- key-of-type? [tag value]
   (and (jolt.host/table? value)

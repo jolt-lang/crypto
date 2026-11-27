@@ -97,6 +97,32 @@
 (ffi/defcfn c-bn-free      "BN_free"             [:pointer] :void)
 (ffi/defcfn c-pkey-set-rsa "EVP_PKEY_set1_RSA"   [:pointer :pointer] :int)
 
+;; JWK parameter construction and inspection. BIGNUMs are copied into OpenSSL
+;; keys, and every native key/point is released before the public byte/map value
+;; is returned. RSA_set0_* transfers ownership only on success.
+(ffi/defcfn c-bn-bin2bn       "BN_bin2bn"           [:pointer :int :pointer] :pointer)
+(ffi/defcfn c-bn-bn2bin       "BN_bn2bin"           [:pointer :pointer] :int)
+(ffi/defcfn c-bn-num-bits     "BN_num_bits"         [:pointer] :int)
+(ffi/defcfn c-rsa-set0-key    "RSA_set0_key"        [:pointer :pointer :pointer :pointer] :int)
+(ffi/defcfn c-rsa-set0-factors "RSA_set0_factors"   [:pointer :pointer :pointer] :int)
+(ffi/defcfn c-rsa-set0-crt    "RSA_set0_crt_params" [:pointer :pointer :pointer :pointer] :int)
+(ffi/defcfn c-rsa-get0-key    "RSA_get0_key"        [:pointer :pointer :pointer :pointer] :void)
+(ffi/defcfn c-rsa-check       "RSA_check_key"       [:pointer] :int)
+(ffi/defcfn c-pkey-get-rsa    "EVP_PKEY_get1_RSA"   [:pointer] :pointer)
+(ffi/defcfn c-ec-set-private  "EC_KEY_set_private_key" [:pointer :pointer] :int)
+(ffi/defcfn c-ec-set-public   "EC_KEY_set_public_key"  [:pointer :pointer] :int)
+(ffi/defcfn c-ec-get0-group   "EC_KEY_get0_group"      [:pointer] :pointer)
+(ffi/defcfn c-ec-get0-private "EC_KEY_get0_private_key" [:pointer] :pointer)
+(ffi/defcfn c-ec-get0-public  "EC_KEY_get0_public_key"  [:pointer] :pointer)
+(ffi/defcfn c-ec-check        "EC_KEY_check_key"       [:pointer] :int)
+(ffi/defcfn c-ec-group-nid    "EC_GROUP_get_curve_name" [:pointer] :int)
+(ffi/defcfn c-ec-point-new    "EC_POINT_new"          [:pointer] :pointer)
+(ffi/defcfn c-ec-point-free   "EC_POINT_free"         [:pointer] :void)
+(ffi/defcfn c-ec-point-set    "EC_POINT_set_affine_coordinates" [:pointer :pointer :pointer :pointer :pointer] :int)
+(ffi/defcfn c-ec-point-mul    "EC_POINT_mul"          [:pointer :pointer :pointer :pointer :pointer :pointer] :int)
+(ffi/defcfn c-ec-point-octets "EC_POINT_point2oct"    [:pointer :pointer :int :pointer :size_t :pointer] :size_t)
+(ffi/defcfn c-pkey-get-ec     "EVP_PKEY_get1_EC_KEY"  [:pointer] :pointer)
+
 ;; Ed25519 keygen goes through an EVP_PKEY_CTX for the key type (NID 1087).
 ;; These are exported functions in both 1.1.1 and 3. Signing needs nothing
 ;; new: EVP_DigestSign/EVP_DigestVerify with a NULL digest are Ed25519's
@@ -105,6 +131,10 @@
 (ffi/defcfn c-pkey-keygen-init "EVP_PKEY_keygen_init" [:pointer] :int)
 (ffi/defcfn c-pkey-keygen      "EVP_PKEY_keygen"      [:pointer :pointer] :int)
 (ffi/defcfn c-pkey-ctx-free    "EVP_PKEY_CTX_free"    [:pointer] :void)
+(ffi/defcfn c-pkey-new-raw-private "EVP_PKEY_new_raw_private_key" [:int :pointer :pointer :size_t] :pointer)
+(ffi/defcfn c-pkey-new-raw-public  "EVP_PKEY_new_raw_public_key"  [:int :pointer :pointer :size_t] :pointer)
+(ffi/defcfn c-pkey-get-raw-private "EVP_PKEY_get_raw_private_key" [:pointer :pointer :pointer] :int)
+(ffi/defcfn c-pkey-get-raw-public  "EVP_PKEY_get_raw_public_key"  [:pointer :pointer :pointer] :int)
 
 ;; OpenSSL 3 reports the decoded key's concrete type directly. This avoids
 ;; guessing from filenames or probing algorithm-specific getters.
@@ -593,6 +623,7 @@
       (finally (c-bn-free e) (c-rsa-free rsa)))))
 
 (def ^:private nid-ed25519 1087)
+(def ^:private nid-ed448 1088)
 
 (defn generate-ed25519-keypair
   "Generate an Ed25519 keypair. Returns {:public <X.509 DER> :private <PKCS#8 DER>},
@@ -615,6 +646,330 @@
               (finally (c-pkey-free pkey))))
           (finally (ffi/free holder))))
       (finally (c-pkey-ctx-free ctx)))))
+
+;; --- JWK key parameter boundary ---------------------------------------------
+;; These functions are public only so the jwk namespaces can share the existing
+;; OpenSSL shim. Their values contain bytes, strings, and tagged DER keys only.
+(defn- bn-from-unsigned [data]
+  (let [data (as-ba data)]
+    (with-ptrs [data]
+      (fn [ptr]
+        (let [bn (c-bn-bin2bn ptr (alength data) ffi/null)]
+          (when (ffi/null? bn)
+            (throw (ex-info "OpenSSL BIGNUM initialization failed" {})))
+          bn)))))
+
+(defn- bn->unsigned [bn]
+  (when-not (ffi/null? bn)
+    (let [length (quot (+ (c-bn-num-bits bn) 7) 8)
+          output (ffi/alloc (max 1 length))]
+      (try
+        (let [written (c-bn-bn2bin bn output)]
+          (when-not (= length written)
+            (throw (ex-info "OpenSSL BIGNUM encoding failed"
+                            {:expected length :actual written})))
+          (ffi/read-array output length))
+        (finally (ffi/free output))))))
+
+(defn- rsa-set0! [rsa setter values]
+  (let [owned (atom [])]
+    (try
+      (let [args (mapv (fn [value]
+                         (if (nil? value)
+                           ffi/null
+                           (let [bn (bn-from-unsigned value)]
+                             (swap! owned conj bn)
+                             bn)))
+                       values)]
+        (when-not (= 1 (apply setter rsa args))
+          (throw (ex-info "OpenSSL RSA parameter initialization failed" {}))))
+      (catch Exception e
+        (doseq [bn @owned] (c-bn-free bn))
+        (c-err-clear)
+        (throw e)))))
+
+(defn- check-native-key [check-fn key algorithm]
+  (when-not (= 1 (check-fn key))
+    (c-err-clear)
+    (throw (ex-info (str "Invalid " algorithm " key parameters") {}))))
+
+(defn rsa-public-from-parameters
+  "Build a tagged RSA PublicKey from unsigned n and e bytes. JWK-internal."
+  [n e]
+  (let [rsa (c-rsa-new)]
+    (when (ffi/null? rsa)
+      (throw (ex-info "OpenSSL RSA allocation failed" {})))
+    (try
+      (rsa-set0! rsa c-rsa-set0-key [n e nil])
+      (let [pkey (c-pkey-new)]
+        (when (ffi/null? pkey)
+          (throw (ex-info "OpenSSL EVP_PKEY allocation failed" {})))
+        (try
+          (when-not (= 1 (c-pkey-set-rsa pkey rsa))
+            (throw (ex-info "OpenSSL RSA key wrapping failed" {})))
+          (decode-public-key (der-out c-i2d-pubkey pkey))
+          (finally (c-pkey-free pkey))))
+      (finally (c-rsa-free rsa)))))
+
+(defn rsa-private-from-parameters
+  "Build a tagged RSA PrivateKey from a complete unsigned parameter map."
+  [{:keys [n e d p q dp dq qi]}]
+  (let [rsa (c-rsa-new)]
+    (when (ffi/null? rsa)
+      (throw (ex-info "OpenSSL RSA allocation failed" {})))
+    (try
+      (rsa-set0! rsa c-rsa-set0-key [n e d])
+      (rsa-set0! rsa c-rsa-set0-factors [p q])
+      (rsa-set0! rsa c-rsa-set0-crt [dp dq qi])
+      (check-native-key c-rsa-check rsa "RSA")
+      (let [pkey (c-pkey-new)]
+        (when (ffi/null? pkey)
+          (throw (ex-info "OpenSSL EVP_PKEY allocation failed" {})))
+        (try
+          (when-not (= 1 (c-pkey-set-rsa pkey rsa))
+            (throw (ex-info "OpenSSL RSA key wrapping failed" {})))
+          (let [p8 (c-pkey->p8 pkey)]
+            (when (ffi/null? p8)
+              (c-err-clear)
+              (throw (ex-info "OpenSSL RSA PKCS#8 encoding failed" {})))
+            (try
+              (decode-private-key (der-out c-i2d-p8 p8))
+              (finally (c-p8-free p8))))
+          (finally (c-pkey-free pkey))))
+      (finally (c-rsa-free rsa)))))
+
+(defn- with-rsa-parameters [key private? f]
+  (with-der-key (if private? c-d2i-privkey c-d2i-pubkey) (tget key :bytes)
+    (fn [pkey]
+      (let [rsa (c-pkey-get-rsa pkey)]
+        (when (ffi/null? rsa)
+          (c-err-clear)
+          (throw (ex-info "Expected an RSA key" {})))
+        (try
+          (let [holders (ffi/alloc (* 3 ptr-size))]
+            (try
+              (c-rsa-get0-key rsa holders (+ holders ptr-size) (+ holders (* 2 ptr-size)))
+              (f (bn->unsigned (ffi/read holders :pointer 0))
+                 (bn->unsigned (ffi/read holders :pointer ptr-size))
+                 (bn->unsigned (ffi/read holders :pointer (* 2 ptr-size))))
+              (finally (ffi/free holders))))
+          (finally (c-rsa-free rsa)))))))
+
+(defn rsa-public-parameters
+  "Return {:n bytes :e bytes} from a tagged RSA PublicKey. JWK-internal."
+  [key]
+  (with-rsa-parameters key false
+    (fn [n e _] {:n n :e e})))
+
+(defn rsa-private-parameters
+  "Return unsigned {:n :e :d} bytes from a tagged RSA PrivateKey."
+  [key]
+  (with-rsa-parameters key true
+    (fn [n e d] {:n n :e e :d d})))
+
+(defn- ec-set-public! [eck x y]
+  (let [group (c-ec-get0-group eck)
+        point (c-ec-point-new group)]
+    (when (ffi/null? point)
+      (throw (ex-info "OpenSSL EC point allocation failed" {})))
+    (let [xbn (atom nil)
+          ybn (atom nil)]
+      (try
+        (reset! xbn (bn-from-unsigned x))
+        (reset! ybn (bn-from-unsigned y))
+        (when-not (= 1 (c-ec-point-set group point @xbn @ybn ffi/null))
+          (c-err-clear)
+          (throw (ex-info "OpenSSL EC coordinate initialization failed" {})))
+        (when-not (= 1 (c-ec-set-public eck point))
+          (c-err-clear)
+          (throw (ex-info "OpenSSL EC public key initialization failed" {})))
+        (finally
+          (c-ec-point-free point)
+          (when @xbn (c-bn-free @xbn))
+          (when @ybn (c-bn-free @ybn)))))))
+
+(defn- ec-pkey->der [eck private?]
+  (let [pkey (c-pkey-new)]
+    (when (ffi/null? pkey)
+      (throw (ex-info "OpenSSL EVP_PKEY allocation failed" {})))
+    (try
+      (when-not (= 1 (c-pkey-set-ec pkey eck))
+        (throw (ex-info "OpenSSL EC key wrapping failed" {})))
+      (if private?
+        (let [p8 (c-pkey->p8 pkey)]
+          (when (ffi/null? p8)
+            (c-err-clear)
+            (throw (ex-info "OpenSSL EC PKCS#8 encoding failed" {})))
+          (try
+            (decode-private-key (der-out c-i2d-p8 p8))
+            (finally (c-p8-free p8))))
+        (decode-public-key (der-out c-i2d-pubkey pkey)))
+      (finally (c-pkey-free pkey)))))
+
+(defn ec-public-from-parameters
+  "Build a tagged EC PublicKey from a JWK curve and unsigned x/y bytes."
+  [curve x y]
+  (let [eck (c-ec-new-curve (curve-nid curve))]
+    (when (ffi/null? eck)
+      (throw (ex-info (str "Unsupported EC curve: " curve) {:curve curve})))
+    (try
+      (ec-set-public! eck x y)
+      (check-native-key c-ec-check eck "EC")
+      (ec-pkey->der eck false)
+      (finally (c-ec-free eck)))))
+
+(defn ec-private-from-parameters
+  "Build a tagged EC PrivateKey from a JWK curve and unsigned d/x/y bytes."
+  [curve d x y]
+  (let [eck (c-ec-new-curve (curve-nid curve))]
+    (when (ffi/null? eck)
+      (throw (ex-info (str "Unsupported EC curve: " curve) {:curve curve})))
+    (try
+      (ec-set-public! eck x y)
+      (let [dbn (bn-from-unsigned d)]
+        (try
+          (when-not (= 1 (c-ec-set-private eck dbn))
+            (c-err-clear)
+            (throw (ex-info "OpenSSL EC private key initialization failed" {})))
+          (finally (c-bn-free dbn))))
+      (check-native-key c-ec-check eck "EC")
+      (ec-pkey->der eck true)
+      (finally (c-ec-free eck)))))
+
+(def ^:private jwk-curves
+  {415 ["P-256" 32] 714 ["secp256k1" 32]
+   715 ["P-384" 48] 716 ["P-521" 66]})
+
+(defn- ec-point-fields [eck derive?]
+  (let [group (c-ec-get0-group eck)
+        nid (c-ec-group-nid group)
+        [curve width] (or (get jwk-curves nid)
+                          (throw (ex-info "Unsupported EC curve" {:nid nid})))
+        existing (c-ec-get0-public eck)
+        derive (and (ffi/null? existing) derive?)
+        point (if derive (c-ec-point-new group) existing)]
+    (when (ffi/null? point)
+      (throw (ex-info "EC key has no public point" {})))
+    (try
+      (when derive
+        (when-not (= 1 (c-ec-point-mul group point ffi/null ffi/null
+                                       (c-ec-get0-private eck) ffi/null))
+          (c-err-clear)
+          (throw (ex-info "OpenSSL EC public key derivation failed" {}))))
+      (let [expected (inc (* 2 width))
+            actual (c-ec-point-octets group point 4 ffi/null 0 ffi/null)]
+        (when-not (= expected actual)
+          (throw (ex-info "Unexpected EC point width" {:expected expected :actual actual})))
+        (let [buffer (ffi/alloc actual)]
+          (try
+            (when-not (= actual (c-ec-point-octets group point 4 buffer actual ffi/null))
+              (throw (ex-info "OpenSSL EC point encoding failed" {})))
+            (let [encoded (ffi/read-array buffer actual)]
+              {:crv curve
+               :x (ba-window encoded 1 width)
+               :y (ba-window encoded (inc width) width)})
+            (finally (ffi/free buffer)))))
+      (finally
+        (when derive (c-ec-point-free point))))))
+
+(defn- with-ec-parameters [key private? f]
+  (with-der-key (if private? c-d2i-privkey c-d2i-pubkey) (tget key :bytes)
+    (fn [pkey]
+      (let [eck (c-pkey-get-ec pkey)]
+        (when (ffi/null? eck)
+          (c-err-clear)
+          (throw (ex-info "Expected an EC key" {})))
+        (try (f eck) (finally (c-ec-free eck)))))))
+
+(defn ec-public-parameters
+  "Return {:crv string :x bytes :y bytes} from a tagged EC PublicKey."
+  [key]
+  (with-ec-parameters key false #(ec-point-fields % false)))
+
+(defn ec-private-parameters
+  "Return curve/public coordinates and unsigned d bytes from an EC PrivateKey."
+  [key]
+  (with-ec-parameters key true
+    (fn [eck]
+      (let [private (c-ec-get0-private eck)]
+        (when (ffi/null? private)
+          (throw (ex-info "EC key has no private scalar" {})))
+        (assoc (ec-point-fields eck true)
+               :d (bn->unsigned private))))))
+
+(def ^:private ed-curves
+  {"Ed25519" [nid-ed25519 32]
+   "Ed448" [nid-ed448 57]})
+
+(defn- ed-from-raw [curve raw private?]
+  (let [raw (as-ba raw)
+        [nid length] (or (get ed-curves curve)
+                         (throw (ex-info (str "Unsupported EdDSA curve: " curve)
+                                         {:curve curve})))]
+    (when-not (= length (alength raw))
+      (throw (ex-info (str curve " raw keys must be " length " bytes")
+                      {:curve curve :expected length :actual (alength raw)})))
+    (with-ptrs [raw]
+      (fn [ptr]
+        (let [pkey ((if private? c-pkey-new-raw-private c-pkey-new-raw-public)
+                    nid ffi/null ptr length)]
+          (when (ffi/null? pkey)
+            (c-err-clear)
+            (throw (ex-info (str "OpenSSL " curve " raw key initialization failed") {})))
+          (try
+            (if private?
+              (let [p8 (c-pkey->p8 pkey)]
+                (when (ffi/null? p8)
+                  (throw (ex-info (str curve " PKCS#8 encoding failed") {})))
+                (try
+                  (decode-private-key (der-out c-i2d-p8 p8))
+                  (finally (c-p8-free p8))))
+              (decode-public-key (der-out c-i2d-pubkey pkey)))
+            (finally (c-pkey-free pkey))))))))
+
+(defn ed-private-from-raw
+  "Build a tagged Ed25519/Ed448 PrivateKey from its raw private bytes."
+  [curve raw]
+  (ed-from-raw curve raw true))
+
+(defn ed-public-from-raw
+  "Build a tagged Ed25519/Ed448 PublicKey from its raw public bytes."
+  [curve raw]
+  (ed-from-raw curve raw false))
+
+(defn- ed-raw-from-key [key private? raw-kind]
+  (with-der-key (if private? c-d2i-privkey c-d2i-pubkey) (tget key :bytes)
+    (fn [pkey]
+      (let [length-holder (ffi/alloc 8)]
+        (try
+          (let [getter (if (= :private raw-kind) c-pkey-get-raw-private c-pkey-get-raw-public)]
+            (when-not (= 1 (getter pkey ffi/null length-holder))
+              (c-err-clear)
+              (throw (ex-info "OpenSSL raw EdDSA key sizing failed" {})))
+            (let [length (ffi/read length-holder :size_t)
+                  buffer (ffi/alloc length)]
+              (try
+                (when-not (= 1 (getter pkey buffer length-holder))
+                  (c-err-clear)
+                  (throw (ex-info "OpenSSL raw EdDSA key extraction failed" {})))
+                (ffi/read-array buffer (ffi/read length-holder :size_t))
+                (finally (ffi/free buffer)))))
+          (finally (ffi/free length-holder)))))))
+
+(defn ed-private-bytes
+  "Extract raw private bytes from a tagged EdDSA PrivateKey. JWK-internal."
+  [key]
+  (ed-raw-from-key key true :private))
+
+(defn ed-public-bytes
+  "Extract raw public bytes from a tagged EdDSA PublicKey. JWK-internal."
+  [key]
+  (ed-raw-from-key key false :public))
+
+(defn ed-derived-public-bytes
+  "Derive raw public bytes from a tagged EdDSA PrivateKey. JWK-internal."
+  [key]
+  (ed-raw-from-key key true :public))
 
 (defn- generate-keypair-for
   "Draw a keypair from a KeyPairGenerator shim's state: {:public :private
