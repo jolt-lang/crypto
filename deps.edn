@@ -16,6 +16,7 @@
  ;; Fully-qualified only; jolt derives the simple spelling.
  :jolt/provides {jolt.crypto ["java.security.MessageDigest"
                               "javax.crypto.Mac"
+                              "javax.crypto.KeyAgreement"
                               "javax.crypto.Cipher"
                               "javax.crypto.spec.SecretKeySpec"
                               "javax.crypto.spec.IvParameterSpec"

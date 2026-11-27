@@ -5,6 +5,7 @@
             [jolt.crypto.bytes :as crypto-bytes]
             [jolt.crypto.crypto :as buddy-crypto]
             [jolt.crypto.bytes-test]
+            [jolt.x25519-test]
             [jolt.jca-gcm-test]
             [jolt.crypto.codecs-test]
             [jolt.crypto.padding-test]
@@ -323,6 +324,12 @@
       (check (str "case-insensitive MessageDigest " alias)
              (= (hex (.digest (MessageDigest/getInstance canonical) input))
                 (hex (.digest (MessageDigest/getInstance alias) input))))))
+  (doseq [[a b expected] [[nil nil true] [nil [] false] [[] nil false]
+                          [[] [] true] [[1 2] [1 2] true] [[3 2] [1 2] false]
+                          [[1 2] [1 3] false] [[0] [0 0] false] [[0 0] [] false]]]
+    (check "MessageDigest.isEqual" (= expected (MessageDigest/isEqual
+                                                (when a (byte-array a))
+                                                (when b (byte-array b))))))
   (test-large-input-digest)
   (test-update-snapshots-input)
   (test-offset-length-overloads)
@@ -760,7 +767,7 @@
     (check "getInstanceStrong returns a working generator"
            (int? (.nextInt (java.security.SecureRandom/getInstanceStrong) 100))))
 
-  (let [{:keys [fail error]} (t/run-tests 'jolt.crypto.bytes-test
+  (let [{:keys [fail error]} (t/run-tests 'jolt.x25519-test 'jolt.crypto.bytes-test
                                           'jolt.jca-gcm-test
                                           'jolt.crypto.codecs-test
                                           'jolt.crypto.padding-test

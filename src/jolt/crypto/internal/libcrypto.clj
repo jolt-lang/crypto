@@ -101,6 +101,10 @@
 ;; These are exported functions in both 1.1.1 and 3. Signing needs nothing
 ;; new: EVP_DigestSign/EVP_DigestVerify with a NULL digest are Ed25519's
 ;; one-shot (PureEdDSA) path.
+(ffi/defcfn c-pkey-ctx-new "EVP_PKEY_CTX_new" [:pointer :pointer] :pointer)
+(ffi/defcfn c-derive-init "EVP_PKEY_derive_init" [:pointer] :int)
+(ffi/defcfn c-derive-peer "EVP_PKEY_derive_set_peer" [:pointer :pointer] :int)
+(ffi/defcfn c-derive "EVP_PKEY_derive" [:pointer :pointer :pointer] :int)
 (ffi/defcfn c-pkey-ctx-new-id  "EVP_PKEY_CTX_new_id"  [:int :pointer] :pointer)
 (ffi/defcfn c-pkey-keygen-init "EVP_PKEY_keygen_init" [:pointer] :int)
 (ffi/defcfn c-pkey-keygen      "EVP_PKEY_keygen"      [:pointer :pointer] :int)
