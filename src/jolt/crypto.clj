@@ -910,11 +910,26 @@
      "getMacLength" (fn [self] (let [[_ len] (tget self :md)] len))})
   nil)
 
+(defn- digest-equal? [a b]
+  (cond
+    (identical? a b) true
+    (or (nil? a) (nil? b)) false
+    (zero? (alength b)) (zero? (alength a))
+    :else
+    (let [n (alength a) m (alength b)]
+      ;; Match the JDK: visit every byte of the first digest regardless of
+      ;; content or the length of a nonempty second digest.
+      (loop [i 0 diff (bit-xor n m)]
+        (if (= i n)
+          (zero? diff)
+          (recur (inc i) (bit-or diff (bit-xor (aget a i) (aget b (if (< i m) i 0))))))))))
+
 (defn- install-message-digest!
   "java.security.MessageDigest"
   []
   (doseq [nm ["MessageDigest" "java.security.MessageDigest"]]
-    (__register-class-statics! nm {"getInstance" (fn [algo & _]
+    (__register-class-statics! nm {"isEqual" digest-equal?
+                                  "getInstance" (fn [algo & _]
                                                    (let [[mdf len] (digest-spec algo)]
                                                      (doto (tt :jolt.crypto/md) (tput! :md mdf) (tput! :len len) (tput! :acc []))))}))
   (__register-class-methods! :jolt.crypto/md

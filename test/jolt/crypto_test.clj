@@ -322,6 +322,12 @@
       (check (str "case-insensitive MessageDigest " alias)
              (= (hex (.digest (MessageDigest/getInstance canonical) input))
                 (hex (.digest (MessageDigest/getInstance alias) input))))))
+  (doseq [[a b expected] [[nil nil true] [nil [] false] [[] nil false]
+                          [[] [] true] [[1 2] [1 2] true] [[3 2] [1 2] false]
+                          [[1 2] [1 3] false] [[0] [0 0] false] [[0 0] [] false]]]
+    (check "MessageDigest.isEqual" (= expected (MessageDigest/isEqual
+                                                (when a (byte-array a))
+                                                (when b (byte-array b))))))
   (test-large-input-digest)
   (test-update-snapshots-input)
   (test-offset-length-overloads)
