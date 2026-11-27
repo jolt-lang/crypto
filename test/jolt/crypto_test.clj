@@ -12,6 +12,7 @@
             [jolt.crypto.mac-test]
             [jolt.crypto.kdf-test]
             [jolt.crypto.crypto-test]
+            [jolt.crypto.keys-test]
             [jolt.crypto.x509-test :as x509-test]
             [clojure.edn :as edn]
             [clojure.string :as str]
@@ -622,9 +623,9 @@
   (check "a non-EC/RSA KeyPairGenerator throws naming it"
          (= "unsupported KeyPairGenerator algorithm: DSA"
             (try (KeyPairGenerator/getInstance "DSA") nil (catch Exception e (.getMessage e)))))
-  (check "a non-EC/RSA KeyFactory throws naming it"
-         (= "unsupported KeyFactory algorithm: DSA"
-            (try (KeyFactory/getInstance "DSA") nil (catch Exception e (.getMessage e)))))
+  (check "an unsupported KeyFactory throws naming it"
+         (= "unsupported KeyFactory algorithm: DH"
+            (try (KeyFactory/getInstance "DH") nil (catch Exception e (.getMessage e)))))
   (check "garbage key bytes are rejected at generatePublic"
          (= "not a valid DER-encoded key"
             (try (.generatePublic (KeyFactory/getInstance "EC") (X509EncodedKeySpec. (byte-array 10)))
@@ -755,7 +756,8 @@
                                           'jolt.crypto.hash-test
                                           'jolt.crypto.mac-test
                                           'jolt.crypto.kdf-test
-                                          'jolt.crypto.crypto-test)]
+                                          'jolt.crypto.crypto-test
+                                          'jolt.crypto.keys-test)]
     (swap! failures + fail error))
 
   (if (zero? @failures)

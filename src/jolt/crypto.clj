@@ -8,9 +8,9 @@
     MessageDigest SHA-512 / SHA-384 / SHA-256 / SHA-224 / SHA-1 / MD5
     SecureRandom  RAND_bytes
     SecretKeySpec / IvParameterSpec   key + IV holders
-    KeyPairGenerator / KeyFactory / Signature   EC over the NIST P-curves,
-                  RSA and Ed25519, with X509EncodedKeySpec /
-                  PKCS8EncodedKeySpec / ECGenParameterSpec
+    KeyPairGenerator / Signature   EC over the NIST P-curves, RSA and Ed25519
+    KeyFactory   those algorithms plus DSA and Ed448, with X509EncodedKeySpec /
+                  PKCS8EncodedKeySpec / ECGenParameterSpec and PEM decoding
     CertificateFactory   X.509 certificates from PEM or DER, as X509Certificate
                   values (subject/issuer X500Principal, validity, serial,
                   signature algorithm, public key, getEncoded)
@@ -25,6 +25,7 @@
   libcrypto/libssl are declared in deps.edn :jolt/native and loaded before this
   namespace; an app that also pulls http-client shares the one loaded copy."
   (:require [jolt.ffi :as ffi]
+            [jolt.crypto.codecs :as codecs]
             [clojure.string :as str]))
 
 ;; --- OpenSSL (libcrypto) bindings -------------------------------------------
@@ -49,7 +50,7 @@
 (ffi/defcfn c-hmac     "HMAC"   [:pointer :pointer :int :pointer :size_t :pointer :pointer] :pointer)
 (ffi/defcfn c-digest   "EVP_Digest" [:pointer :size_t :pointer :pointer :pointer :pointer] :int)
 
-;; EC and RSA keys, ECDSA/RSASSA-PKCS1-v1_5. EVP_EC_gen is a macro rather
+;; EVP keys and ECDSA/RSASSA-PKCS1-v1_5. EVP_EC_gen is a macro rather
 ;; than an exported symbol, so EC keygen goes through EC_KEY and is then
 ;; wrapped in an EVP_PKEY for encoding and signing; RSA keygen goes through
 ;; RSA_new + RSA_generate_key_ex (EVP_PKEY_CTX-based RSA gen needs
@@ -71,6 +72,10 @@
 (ffi/defcfn c-i2d-p8       "i2d_PKCS8_PRIV_KEY_INFO"  [:pointer :pointer] :int)
 (ffi/defcfn c-p8-free      "PKCS8_PRIV_KEY_INFO_free" [:pointer] :void)
 (ffi/defcfn c-d2i-privkey  "d2i_AutoPrivateKey"       [:pointer :pointer :long] :pointer)
+(ffi/defcfn c-pem-read-privkey "PEM_read_bio_PrivateKey" [:pointer :pointer :pointer :pointer] :pointer)
+(ffi/defcfn c-pem-read-pubkey  "PEM_read_bio_PUBKEY"     [:pointer :pointer :pointer :pointer] :pointer)
+(ffi/defcfn c-des-set-key-unchecked "DES_set_key_unchecked" [:pointer :pointer] :void)
+(ffi/defcfn c-des-cbc-encrypt "DES_cbc_encrypt" [:pointer :pointer :long :pointer :pointer :int] :void)
 (ffi/defcfn c-md-ctx-new   "EVP_MD_CTX_new"           [] :pointer)
 (ffi/defcfn c-md-ctx-free  "EVP_MD_CTX_free"          [:pointer] :void)
 (ffi/defcfn c-dgst-sign-init   "EVP_DigestSignInit"   [:pointer :pointer :pointer :pointer :pointer] :int)
@@ -97,13 +102,9 @@
 (ffi/defcfn c-pkey-keygen      "EVP_PKEY_keygen"      [:pointer :pointer] :int)
 (ffi/defcfn c-pkey-ctx-free    "EVP_PKEY_CTX_free"    [:pointer] :void)
 
-;; What a parsed key actually is. EVP_PKEY_base_id is a real function in 1.1 but
-;; a macro for EVP_PKEY_get_base_id in 3, so neither spelling resolves on both;
-;; EVP_PKEY_get0_* are exported functions in either. A miss pushes
-;; EVP_R_EXPECTING_A_* onto the thread's error queue, which nothing here reads,
-;; so clear it rather than let it accumulate.
-(ffi/defcfn c-pkey-get0-ec  "EVP_PKEY_get0_EC_KEY" [:pointer] :pointer)
-(ffi/defcfn c-pkey-get0-rsa "EVP_PKEY_get0_RSA"    [:pointer] :pointer)
+;; OpenSSL 3 reports the decoded key's concrete type directly. This avoids
+;; guessing from filenames or probing algorithm-specific getters.
+(ffi/defcfn c-pkey-type-name "EVP_PKEY_get0_type_name" [:pointer] :pointer)
 (ffi/defcfn c-err-clear     "ERR_clear_error"      []         :void)
 
 ;; X.509 certificates. A certificate is parsed from PEM (PEM_read_bio_X509) or
@@ -300,35 +301,21 @@
         (try (f pkey) (finally (c-pkey-free pkey))))
       (finally (ffi/free buf) (ffi/free holder)))))
 
+(defn- pkey-type [pkey]
+  (let [name-ptr (c-pkey-type-name pkey)]
+    (when-not (ffi/null? name-ptr)
+      (case (ffi/ptr->string name-ptr)
+        "ED25519" "Ed25519"
+        "ED448" "Ed448"
+        (ffi/ptr->string name-ptr)))))
+
 (defn- pkey-algo
-  "The algorithm a parsed EVP_PKEY actually is: \"EC\", \"RSA\", or nil for
-  anything else — the EVP_Digest* path is algorithm-agnostic, so a key type
-  this namespace does not name is not by itself a reason to refuse."
+  "The JDK algorithm name for a parsed OpenSSL key."
   [pkey]
-  (let [algo (cond
-               (not (ffi/null? (c-pkey-get0-ec pkey)))  "EC"
-               (not (ffi/null? (c-pkey-get0-rsa pkey))) "RSA")]
-    (c-err-clear)
-    algo))
-
-;; Ed25519's AlgorithmIdentifier, SEQUENCE { OID 1.3.101.112 } with no
-;; parameters. OpenSSL has no accessor for an Ed25519 key that is an exported
-;; function in both 1.1 and 3 (EVP_PKEY_id is a macro in 3, EVP_PKEY_get_id
-;; absent in 1.1), so the key type is read from the DER instead. It sits right
-;; after the outer SEQUENCE header in SubjectPublicKeyInfo and after the version
-;; INTEGER in PKCS#8; Ed25519 keys are short, so both lengths are one byte.
-(def ^:private ed25519-algorithm-id [0x30 0x05 0x06 0x03 0x2b 0x65 0x70])
-
-(defn- ed25519-der? [der]
-  (let [b (mapv #(bit-and % 0xff) (take 12 (seq (as-ba der))))
-        at? (fn [i] (= ed25519-algorithm-id (subvec b (min i (count b)) (min (+ i 7) (count b)))))]
-    (and (= 0x30 (first b)) (or (at? 2) (at? 5)))))
-
-(defn- key-algo
-  "The algorithm of a DER key and its parsed EVP_PKEY: \"EdDSA\" (the JDK's
-  name for an Ed25519 key), \"EC\", \"RSA\", or nil."
-  [der pkey]
-  (if (ed25519-der? der) "EdDSA" (pkey-algo pkey)))
+  (case (pkey-type pkey)
+    "Ed25519" "EdDSA"
+    "Ed448" "EdDSA"
+    (pkey-type pkey)))
 
 (defn- check-key-algo
   "Refuse a key that is not the algorithm the caller asked for, as the JDK does
@@ -339,6 +326,220 @@
     (throw (ex-info (str "key algorithm mismatch: expected " want ", got " got)
                     {:expected want :actual got})))
   got)
+
+(defn- check-key-type [factory key]
+  (let [expected (tget factory :key-type)
+        actual (tget key :key-type)]
+    (when (and expected (not= expected actual))
+      (throw (ex-info (str "key type mismatch: expected " expected ", got " actual)
+                      {:expected expected :actual actual}))))
+  key)
+
+(defn key-type
+  "The concrete OpenSSL key type, such as RSA, DSA, EC, Ed25519, or Ed448."
+  [key]
+  (when (table? key)
+    (or (tget key :key-type) (tget key :algo))))
+
+(defn- decoded-key [tag der pkey]
+  (doto (tt tag)
+    (tput! :bytes der)
+    (tput! :algo (pkey-algo pkey))
+    (tput! :key-type (pkey-type pkey))))
+
+(defn decode-public-key
+  "Decode an X.509 SubjectPublicKeyInfo DER value into a tagged PublicKey."
+  [der]
+  (let [der (as-ba der)]
+    (with-der-key c-d2i-pubkey der #(decoded-key :jolt.crypto/public-key der %))))
+
+(defn decode-private-key
+  "Decode a PKCS#8 PrivateKeyInfo DER value into a tagged PrivateKey."
+  [der]
+  (let [der (as-ba der)]
+    (with-der-key c-d2i-privkey der #(decoded-key :jolt.crypto/private-key der %))))
+
+(declare with-mem-bio parse-x509)
+
+;; OpenSSL 3's generic PKCS#8 decoder rejects the pbeWithMD5AndDES-CBC fixture
+;; even though DES-CBC remains available through exported low-level functions.
+;; Support that exact PBE here, without loading the legacy provider; all other
+;; encrypted PKCS#8 inputs continue through the generic decoder first.
+(defn- encrypted-pem? [text]
+  (or (str/includes? text "Proc-Type: 4,ENCRYPTED")
+      (str/includes? text "-----BEGIN ENCRYPTED PRIVATE KEY-----")))
+
+(defn- malformed-pkcs8 []
+  (throw (ex-info "Malformed or unsupported encrypted PKCS#8 key" {})))
+
+(defn- der-node [der offset]
+  (let [size (alength der)]
+    (when (> (+ offset 2) size) (malformed-pkcs8))
+    (let [tag (bit-and (aget der offset) 0xff)
+          first-length (bit-and (aget der (inc offset)) 0xff)
+          length-bytes (if (zero? (bit-and first-length 0x80))
+                         0
+                         (bit-and first-length 0x7f))
+          content-offset (+ offset 2 length-bytes)]
+      (when (or (> length-bytes 4) (> content-offset size)) (malformed-pkcs8))
+      (let [content-length (if (zero? length-bytes)
+                             first-length
+                             (loop [index 0 length 0]
+                               (if (= index length-bytes)
+                                 length
+                                 (recur (inc index)
+                                        (+ (* 256 length)
+                                           (bit-and (aget der (+ offset 2 index)) 0xff))))))
+            end (+ content-offset content-length)]
+        (when (> end size) (malformed-pkcs8))
+        {:tag tag :start content-offset :end end :next end}))))
+
+(defn- der-child [der parent offset tag]
+  (let [node (der-node der offset)]
+    (when (or (not= tag (:tag node)) (> (:next node) (:end parent)))
+      (malformed-pkcs8))
+    node))
+
+(def ^:private pbe-md5-des-oid
+  [0x2a 0x86 0x48 0x86 0xf7 0x0d 0x01 0x05 0x03])
+
+(defn- der-content= [der node expected]
+  (and (= (count expected) (- (:end node) (:start node)))
+       (= expected (mapv #(bit-and % 0xff)
+                         (ba-window der (:start node) (count expected))))))
+
+(defn- der-positive-int [der node]
+  (let [length (- (:end node) (:start node))]
+    (when-not (<= 1 length 4) (malformed-pkcs8))
+    (when (pos? (bit-and (aget der (:start node)) 0x80)) (malformed-pkcs8))
+    (let [value (loop [offset (:start node) value 0]
+                  (if (= offset (:end node))
+                    value
+                    (recur (inc offset)
+                           (+ (* 256 value) (bit-and (aget der offset) 0xff)))))]
+      (when-not (pos? value) (malformed-pkcs8))
+      value)))
+
+(defn- encrypted-pkcs8-fields [text]
+  (let [body (or (second (re-find #"(?s)-----BEGIN ENCRYPTED PRIVATE KEY-----\s*(.*?)-----END ENCRYPTED PRIVATE KEY-----" text))
+                 (malformed-pkcs8))
+        der (try
+              (codecs/b64->bytes (.getBytes (str/replace body #"\s" "") "UTF-8"))
+              (catch Exception _ (malformed-pkcs8)))
+        outer (der-node der 0)
+        _ (when (or (not= 0x30 (:tag outer)) (not= (alength der) (:next outer)))
+            (malformed-pkcs8))
+        algorithm (der-child der outer (:start outer) 0x30)
+        oid (der-child der algorithm (:start algorithm) 0x06)
+        _ (when-not (der-content= der oid pbe-md5-des-oid) (malformed-pkcs8))
+        params (der-child der algorithm (:next oid) 0x30)
+        salt (der-child der params (:start params) 0x04)
+        _ (when-not (= 8 (- (:end salt) (:start salt))) (malformed-pkcs8))
+        iterations-node (der-child der params (:next salt) 0x02)
+        _ (when-not (= (:next iterations-node) (:end params)) (malformed-pkcs8))
+        iterations (der-positive-int der iterations-node)
+        _ (when-not (= (:next params) (:end algorithm)) (malformed-pkcs8))
+        ciphertext (der-child der outer (:next algorithm) 0x04)
+        ciphertext-length (- (:end ciphertext) (:start ciphertext))
+        _ (when (or (zero? ciphertext-length) (not (zero? (mod ciphertext-length 8)))
+                    (not= (:next ciphertext) (:end outer)))
+            (malformed-pkcs8))]
+    {:salt (ba-window der (:start salt) 8)
+     :iterations iterations
+     :ciphertext (ba-window der (:start ciphertext) ciphertext-length)}))
+
+(defn- pbkdf1-md5 [password salt iterations]
+  (loop [iteration 1
+         value (digest c-md5 16 (concat-bas [password salt]))]
+    (if (= iteration iterations)
+      value
+      (recur (inc iteration) (digest c-md5 16 value)))))
+
+(defn- des-cbc-decrypt [key iv ciphertext]
+  (when-not (zero? (mod (alength ciphertext) 8))
+    (throw (ex-info "DES-CBC input must contain complete blocks" {})))
+  (with-ptrs [ciphertext key iv]
+    (fn [input-ptr key-ptr iv-ptr]
+      (let [schedule (ffi/alloc 128)
+            output (ffi/alloc (max 1 (alength ciphertext)))]
+        (try
+          (c-des-set-key-unchecked key-ptr schedule)
+          (c-des-cbc-encrypt input-ptr output (alength ciphertext) schedule iv-ptr 0)
+          (ffi/read-array output (alength ciphertext))
+          (finally
+            (ffi/free schedule)
+            (ffi/free output)))))))
+
+(defn- remove-pkcs7-padding [padded]
+  (let [length (alength padded)]
+    (when (zero? length) (throw (ex-info "Invalid DES-CBC padding" {})))
+    (let [padding (bit-and (aget padded (dec length)) 0xff)]
+      (when (or (zero? padding) (> padding 8) (> padding length))
+        (throw (ex-info "Invalid DES-CBC padding" {})))
+      (dotimes [index padding]
+        (when-not (= padding (bit-and (aget padded (- length 1 index)) 0xff))
+          (throw (ex-info "Invalid DES-CBC padding" {}))))
+      (ba-window padded 0 (- length padding)))))
+
+(defn- decode-pkcs8-md5-des [text passphrase]
+  (let [{:keys [salt iterations ciphertext]} (encrypted-pkcs8-fields text)
+        password (.getBytes passphrase "UTF-8")
+        derived (pbkdf1-md5 password salt iterations)
+        key (ba-window derived 0 8)
+        iv (ba-window derived 8 8)
+        plaintext (remove-pkcs7-padding (des-cbc-decrypt key iv ciphertext))]
+    (decode-private-key plaintext)))
+
+(defn decode-pem-private-key
+  "Decode a traditional or PKCS#8 PEM private key into normalized PKCS#8 DER."
+  [bytes passphrase]
+  (let [bytes (as-ba bytes)
+        text (String. bytes "UTF-8")]
+    (when (and (encrypted-pem? text) (nil? passphrase))
+      (throw (ex-info "Passphrase is mandatory with encrypted keys." {})))
+    (try
+      (with-mem-bio bytes
+        (fn [bio]
+          (let [decode (fn [password]
+                         (c-err-clear)
+                         (let [pkey (c-pem-read-privkey bio ffi/null ffi/null password)]
+                           (when (ffi/null? pkey)
+                             (c-err-clear)
+                             (throw (ex-info "Could not decode PEM private key" {})))
+                           (try
+                             (let [p8 (c-pkey->p8 pkey)]
+                               (when (ffi/null? p8)
+                                 (throw (ex-info "PKCS#8 conversion failed" {})))
+                               (try
+                                 (decode-private-key (der-out c-i2d-p8 p8))
+                                 (finally (c-p8-free p8))))
+                             (finally (c-pkey-free pkey)))))]
+            (if (nil? passphrase)
+              (decode ffi/null)
+              (ffi/with-c-string [password passphrase]
+                (decode password))))))
+      (catch clojure.lang.ExceptionInfo e
+        (if (str/includes? text "-----BEGIN ENCRYPTED PRIVATE KEY-----")
+          (decode-pkcs8-md5-des text passphrase)
+          (throw e))))))
+
+(defn decode-pem-public-key
+  "Decode a PEM SubjectPublicKeyInfo or X.509 certificate public key."
+  [bytes]
+  (let [bytes (as-ba bytes)
+        text (String. bytes "UTF-8")]
+    (if (str/includes? text "-----BEGIN CERTIFICATE-----")
+      (decode-public-key (:der (:public-key (first (parse-x509 bytes)))))
+      (with-mem-bio bytes
+        (fn [bio]
+          (c-err-clear)
+          (let [pkey (c-pem-read-pubkey bio ffi/null ffi/null ffi/null)]
+            (when (ffi/null? pkey)
+              (c-err-clear)
+              (throw (ex-info "Could not decode PEM public key or certificate" {})))
+            (try
+              (decode-public-key (der-out c-i2d-pubkey pkey))
+              (finally (c-pkey-free pkey)))))))))
 
 (defn generate-ec-keypair
   "Generate an EC keypair on `curve`. Returns {:public <X.509 DER> :private <PKCS#8 DER>},
@@ -420,7 +621,10 @@
                                    "EdDSA" (generate-ed25519-keypair)
                                    (generate-ec-keypair (tget self :curve)))]
     (doto (tt :jolt.crypto/keypair)
-      (tput! :public public) (tput! :private private) (tput! :algo (tget self :algo)))))
+      (tput! :public public)
+      (tput! :private private)
+      (tput! :algo (tget self :algo))
+      (tput! :key-type (if (= "EdDSA" (tget self :algo)) "Ed25519" (tget self :algo))))))
 
 (defn pkey-sign
   "Sign `data` with a PKCS#8 DER private key, digesting with md-fn (nil for
@@ -435,7 +639,7 @@
   ([md-fn priv-der data want-algo]
    (with-der-key c-d2i-privkey priv-der
      (fn [pkey]
-       (check-key-algo want-algo (key-algo priv-der pkey))
+       (check-key-algo want-algo (pkey-algo pkey))
        (let [data (as-ba data) dn (alength data)
              ctx (c-md-ctx-new) dp (ffi/alloc (max 1 dn)) lenp (ffi/alloc 8)]
          (try
@@ -463,7 +667,7 @@
   ([md-fn pub-der data sig want-algo]
    (with-der-key c-d2i-pubkey pub-der
      (fn [pkey]
-       (check-key-algo want-algo (key-algo pub-der pkey))
+       (check-key-algo want-algo (pkey-algo pkey))
        (let [data (as-ba data) sig (as-ba sig) dn (alength data) sn (alength sig)
              ctx (c-md-ctx-new) dp (ffi/alloc (max 1 dn)) sp (ffi/alloc (max 1 sn))]
          (try
@@ -599,6 +803,7 @@
           (let [alg (ffi/read holder :pointer 0)
                 sn (if (ffi/null? alg) "" (ffi/ptr->string (c-obj-nid2sn (c-obj-obj2nid alg))))]
             {:algorithm (get key-alg-names sn sn)
+             :key-type (pkey-type pkey)
              :der (der-out c-i2d-pubkey pkey)})
           (finally (ffi/free holder))))
       (finally (c-pkey-free pkey)))))
@@ -960,16 +1165,18 @@
   (__register-class-methods! :jolt.crypto/keypair
     {"getPublic" (fn [self] (doto (tt :jolt.crypto/public-key)
                               (tput! :bytes (tget self :public))
-                              (tput! :algo (tget self :algo))))
+                              (tput! :algo (tget self :algo))
+                              (tput! :key-type (tget self :key-type))))
      "getPrivate" (fn [self] (doto (tt :jolt.crypto/private-key)
                                (tput! :bytes (tget self :private))
-                               (tput! :algo (tget self :algo))))})
+                               (tput! :algo (tget self :algo))
+                               (tput! :key-type (tget self :key-type))))})
 
   ;; java.security.KeyFactory — DER key spec in, key object out. Decoding once
   ;; here means malformed bytes are rejected at generate* time, as on the JVM,
-  ;; rather than surfacing later as a mysterious verification failure. d2i
-  ;; accepts either algorithm's DER, so the parsed key's own NID — not the
-  ;; algorithm the factory was asked for — is what the key gets stamped with,
+  ;; rather than surfacing later as a mysterious verification failure. The
+  ;; decoded key's own OpenSSL type — not the algorithm the factory was asked
+  ;; for or a filename — is what the key gets stamped with,
   ;; and a disagreement between the two is an error, as it is on the JVM.
   (doseq [nm ["KeyFactory" "java.security.KeyFactory"]]
     (__register-class-statics! nm
@@ -977,21 +1184,22 @@
                        (case (str/upper-case (str algo))
                          "EC" (doto (tt :jolt.crypto/key-factory) (tput! :algo "EC"))
                          "RSA" (doto (tt :jolt.crypto/key-factory) (tput! :algo "RSA"))
-                         ("ED25519" "EDDSA") (doto (tt :jolt.crypto/key-factory) (tput! :algo "EdDSA"))
+                         "DSA" (doto (tt :jolt.crypto/key-factory) (tput! :algo "DSA"))
+                         "ED25519" (doto (tt :jolt.crypto/key-factory)
+                                     (tput! :algo "EdDSA") (tput! :key-type "Ed25519"))
+                         "EDDSA" (doto (tt :jolt.crypto/key-factory) (tput! :algo "EdDSA"))
+                         "ED448" (doto (tt :jolt.crypto/key-factory)
+                                   (tput! :algo "EdDSA") (tput! :key-type "Ed448"))
                          (throw (ex-info (str "unsupported KeyFactory algorithm: " algo) {:algo algo}))))}))
   (__register-class-methods! :jolt.crypto/key-factory
     {"generatePublic" (fn [self spec]
-                        (let [der (->ba spec)
-                              algo (with-der-key c-d2i-pubkey der #(key-algo der %))]
-                          (check-key-algo (tget self :algo) algo)
-                          (doto (tt :jolt.crypto/public-key)
-                            (tput! :bytes der) (tput! :algo (or algo (tget self :algo))))))
+                        (let [key (decode-public-key (->ba spec))]
+                          (check-key-algo (tget self :algo) (tget key :algo))
+                          (check-key-type self key)))
      "generatePrivate" (fn [self spec]
-                         (let [der (->ba spec)
-                               algo (with-der-key c-d2i-privkey der #(key-algo der %))]
-                           (check-key-algo (tget self :algo) algo)
-                           (doto (tt :jolt.crypto/private-key)
-                             (tput! :bytes der) (tput! :algo (or algo (tget self :algo))))))
+                         (let [key (decode-private-key (->ba spec))]
+                           (check-key-algo (tget self :algo) (tget key :algo))
+                           (check-key-type self key)))
      "getAlgorithm" (fn [self] (tget self :algo))})
 
   ;; java.security.Signature — stateful like Cipher: init picks key and
@@ -1076,8 +1284,11 @@
      "getSigAlgName" (fn [self] (let [oid (tget self :sig-alg-oid)] (get sig-alg-names oid oid)))
      ;; the same PublicKey KeyFactory builds, so it initVerify's a Signature
      "getPublicKey" (fn [self]
-                      (let [{:keys [algorithm der]} (tget self :public-key)]
-                        (doto (tt :jolt.crypto/public-key) (tput! :bytes der) (tput! :algo algorithm))))
+                      (let [{:keys [algorithm key-type der]} (tget self :public-key)]
+                        (doto (tt :jolt.crypto/public-key)
+                          (tput! :bytes der)
+                          (tput! :algo algorithm)
+                          (tput! :key-type key-type))))
      ;; checkValidity() is now; checkValidity(Date) is that instant
      "checkValidity" (fn [self & [date]]
                        (let [now (if date (.getTime date) (System/currentTimeMillis))

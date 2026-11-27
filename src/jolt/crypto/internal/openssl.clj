@@ -22,6 +22,10 @@
 (ffi/defcfn c-aes-128-gcm "EVP_aes_128_gcm" [] :pointer)
 (ffi/defcfn c-aes-192-gcm "EVP_aes_192_gcm" [] :pointer)
 (ffi/defcfn c-aes-256-gcm "EVP_aes_256_gcm" [] :pointer)
+(ffi/defcfn c-aes-set-encrypt-key "AES_set_encrypt_key" [:pointer :int :pointer] :int)
+(ffi/defcfn c-aes-set-decrypt-key "AES_set_decrypt_key" [:pointer :int :pointer] :int)
+(ffi/defcfn c-aes-wrap-key "AES_wrap_key" [:pointer :pointer :pointer :pointer :uint] :int)
+(ffi/defcfn c-aes-unwrap-key "AES_unwrap_key" [:pointer :pointer :pointer :pointer :uint] :int)
 (ffi/defcfn c-chacha20 "EVP_chacha20" [] :pointer)
 (ffi/defcfn c-cipher-ctx-new "EVP_CIPHER_CTX_new" [] :pointer)
 (ffi/defcfn c-cipher-ctrl "EVP_CIPHER_CTX_ctrl" [:pointer :int :int :pointer] :int)
@@ -161,6 +165,49 @@
               (ffi/read-array output length)
               (finally
                 (ffi/free output)))))))))
+
+(defn- aes-key-wrap [op input secret]
+  (let [input (as-bytes input)
+        secret (as-bytes secret)
+        input-length (alength input)
+        secret-length (alength secret)
+        wrapping? (= :wrap op)
+        minimum 16
+        output-length (if wrapping? (+ input-length 8) (- input-length 8))]
+    (when-not (#{16 24 32} secret-length)
+      (throw (ex-info "AES key-wrap KEK must be 16, 24, or 32 bytes"
+                      {:key-length secret-length :op op})))
+    (when-not (and (>= input-length minimum) (zero? (mod input-length 8)))
+      (throw (ex-info (str "AES key-wrap input must be a multiple of 8 bytes and at least " minimum)
+                      {:input-length input-length :op op})))
+    (with-byte-ptrs [input secret]
+      (fn [input-ptr secret-ptr]
+        ;; OpenSSL's AES_KEY is 60 32-bit round-key words plus an int rounds.
+        (let [aes-key (ffi/alloc 256)
+              output (ffi/alloc (max 1 output-length))]
+          (try
+            (let [set-key (if wrapping? c-aes-set-encrypt-key c-aes-set-decrypt-key)]
+              (when-not (zero? (set-key secret-ptr (* 8 secret-length) aes-key))
+                (throw (ex-info "OpenSSL AES key-wrap key initialization failed" {:op op}))))
+            (let [wrap-fn (if wrapping? c-aes-wrap-key c-aes-unwrap-key)
+                  actual-length (wrap-fn aes-key ffi/null output input-ptr input-length)]
+              (when-not (= output-length actual-length)
+                (throw (ex-info "OpenSSL AES key wrap failed integrity or length validation"
+                                {:op op :expected output-length :actual actual-length})))
+              (ffi/read-array output actual-length))
+            (finally
+              (ffi/free aes-key)
+              (ffi/free output))))))))
+
+(defn aes-wrap
+  "Wrap a multiple-of-8 key with RFC 3394 AES Key Wrap."
+  [input secret]
+  (aes-key-wrap :wrap input secret))
+
+(defn aes-unwrap
+  "Authenticate and unwrap an RFC 3394 wrapped key."
+  [input secret]
+  (aes-key-wrap :unwrap input secret))
 
 (def ^:private aes-ciphers
   {:ecb {16 c-aes-128-ecb 24 c-aes-192-ecb 32 c-aes-256-ecb}
