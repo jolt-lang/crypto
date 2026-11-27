@@ -6,6 +6,7 @@
 (ffi/defcfn c-digest-size "EVP_MD_get_size" [:pointer] :int)
 (ffi/defcfn c-digest "EVP_Digest" [:pointer :size_t :pointer :pointer :pointer :pointer] :int)
 (ffi/defcfn c-hmac "HMAC" [:pointer :pointer :int :pointer :size_t :pointer :pointer] :pointer)
+(ffi/defcfn c-pbkdf2-hmac "PKCS5_PBKDF2_HMAC" [:pointer :int :pointer :int :int :pointer :int :pointer] :int :blocking)
 (ffi/defcfn c-aes-128-ecb "EVP_aes_128_ecb" [] :pointer)
 (ffi/defcfn c-cipher-ctx-new "EVP_CIPHER_CTX_new" [] :pointer)
 (ffi/defcfn c-cipher-ctx-free "EVP_CIPHER_CTX_free" [:pointer] :void)
@@ -114,6 +115,30 @@
               (ffi/read-array output length))
             (finally
               (ffi/free output))))))))
+
+(defn pbkdf2-bytes [algorithm key salt iterations length]
+  (let [md (digest-md algorithm)
+        key (as-bytes key)
+        salt (as-bytes salt)]
+    (when-not (and (integer? iterations) (<= 1 iterations 2147483647))
+      (throw (ex-info "PBKDF2 iterations must be a positive 32-bit integer"
+                      {:iterations iterations})))
+    (when-not (and (integer? length) (<= 0 length 2147483647))
+      (throw (ex-info "PBKDF2 output length must be a non-negative 32-bit integer"
+                      {:length length})))
+    (if (zero? length)
+      (byte-array 0)
+      (with-byte-ptrs [key salt]
+        (fn [key-ptr salt-ptr]
+          (let [output (ffi/alloc length)]
+            (try
+              (when-not (= 1 (c-pbkdf2-hmac key-ptr (alength key) salt-ptr (alength salt)
+                                            iterations md length output))
+                (throw (ex-info (str "OpenSSL PBKDF2 failed: " algorithm)
+                                {:algorithm algorithm})))
+              (ffi/read-array output length)
+              (finally
+                (ffi/free output)))))))))
 
 (defn- aes-128-ecb-block [key block]
   (with-byte-ptrs [key block]

@@ -8,6 +8,7 @@
             [jolt.crypto.nonce-test]
             [jolt.crypto.hash-test]
             [jolt.crypto.mac-test]
+            [jolt.crypto.kdf-test]
             [jolt.crypto.x509-test :as x509-test]
             [clojure.edn :as edn]
             [clojure.string :as str]
@@ -721,7 +722,8 @@
                                           'jolt.crypto.padding-test
                                           'jolt.crypto.nonce-test
                                           'jolt.crypto.hash-test
-                                          'jolt.crypto.mac-test)]
+                                          'jolt.crypto.mac-test
+                                          'jolt.crypto.kdf-test)]
     (swap! failures + fail error))
 
   (if (zero? @failures)
