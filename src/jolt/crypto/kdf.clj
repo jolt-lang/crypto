@@ -149,9 +149,11 @@
   [options]
   (engine (assoc options :alg :hkdf :digest :sha384)))
 
+;; Buddy's misspelling of +sha384. Buddy mapped it to a digest that does not
+;; exist, so it always threw; here it means what it was meant to.
 (defmethod engine :hkdf+sha386
   [options]
-  (engine (assoc options :alg :hkdf :digest :sha386)))
+  (engine (assoc options :alg :hkdf :digest :sha384)))
 
 (defmethod engine :hkdf+sha512
   [options]
@@ -188,9 +190,11 @@
   [options]
   (engine (assoc options :alg :kdf1 :digest :sha384)))
 
+;; Buddy's misspelling of +sha384. Buddy mapped it to a digest that does not
+;; exist, so it always threw; here it means what it was meant to.
 (defmethod engine :kdf1+sha386
   [options]
-  (engine (assoc options :alg :kdf1 :digest :sha386)))
+  (engine (assoc options :alg :kdf1 :digest :sha384)))
 
 (defmethod engine :kdf1+sha512
   [options]
@@ -212,9 +216,11 @@
   [options]
   (engine (assoc options :alg :kdf2 :digest :sha384)))
 
+;; Buddy's misspelling of +sha384. Buddy mapped it to a digest that does not
+;; exist, so it always threw; here it means what it was meant to.
 (defmethod engine :kdf2+sha386
   [options]
-  (engine (assoc options :alg :kdf2 :digest :sha386)))
+  (engine (assoc options :alg :kdf2 :digest :sha384)))
 
 (defmethod engine :kdf2+sha512
   [options]
@@ -246,9 +252,11 @@
   [options]
   (engine (assoc options :alg :cmkdf :digest :sha384)))
 
+;; Buddy's misspelling of +sha384. Buddy mapped it to a digest that does not
+;; exist, so it always threw; here it means what it was meant to.
 (defmethod engine :cmkdf+sha386
   [options]
-  (engine (assoc options :alg :cmkdf :digest :sha386)))
+  (engine (assoc options :alg :cmkdf :digest :sha384)))
 
 (defmethod engine :cmkdf+sha512
   [options]
@@ -288,9 +296,11 @@
   [options]
   (engine (assoc options :alg :fmkdf :digest :sha384)))
 
+;; Buddy's misspelling of +sha384. Buddy mapped it to a digest that does not
+;; exist, so it always threw; here it means what it was meant to.
 (defmethod engine :fmkdf+sha386
   [options]
-  (engine (assoc options :alg :fmkdf :digest :sha386)))
+  (engine (assoc options :alg :fmkdf :digest :sha384)))
 
 (defmethod engine :fmkdf+sha512
   [options]
@@ -331,9 +341,11 @@
   [options]
   (engine (assoc options :alg :dpimkdf :digest :sha384)))
 
+;; Buddy's misspelling of +sha384. Buddy mapped it to a digest that does not
+;; exist, so it always threw; here it means what it was meant to.
 (defmethod engine :dpimkdf+sha386
   [options]
-  (engine (assoc options :alg :dpimkdf :digest :sha386)))
+  (engine (assoc options :alg :dpimkdf :digest :sha384)))
 
 (defmethod engine :dpimkdf+sha512
   [options]

@@ -9,6 +9,20 @@ matching `:git/sha`.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-27
+
+### Fixed
+
+- **Buddy's misspelled `+sha386` KDF aliases work.** `:hkdf+sha386`,
+  `:kdf1+sha386`, `:kdf2+sha386`, `:cmkdf+sha386`, `:fmkdf+sha386` and
+  `:dpimkdf+sha386` resolve to SHA-384, the same as the `+sha384` aliases.
+  In Buddy they always threw.
+- **RSA private-key JWKs carry the CRT fields.** `keys/jwk` now writes `p`,
+  `q`, `dp`, `dq` and `qi` for any key that has them, such as one loaded from
+  PEM. A key read from an n/e/d-only JWK is still written back as n/e/d.
+- AES-Poly1305 engines feed OpenSSL as the data arrives, the way the hash and
+  HMAC engines do, so MACing a stream runs in constant memory.
+
 ## [0.4.0] - 2026-11-27
 
 ### Added
@@ -198,7 +212,8 @@ The same code as 0.1.0, tagged on the merge of #16.
 - First release: AES/CBC, HMAC, SHA digests, MD5 and `SecureRandom` over
   OpenSSL, through the `javax.crypto` / `java.security` classes.
 
-[Unreleased]: https://github.com/jolt-lang/crypto/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/jolt-lang/crypto/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/jolt-lang/crypto/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/jolt-lang/crypto/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jolt-lang/crypto/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/jolt-lang/crypto/compare/v0.2.0...v0.2.1

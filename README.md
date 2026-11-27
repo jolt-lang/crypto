@@ -163,8 +163,8 @@ Their generic forms accept the supported digest keywords; PBKDF2 defaults to
 returns a byte array and `get-buffer` returns a `ByteBuffer` over the derived
 bytes. HKDF, KDF1, KDF2, CMKDF, FMKDF, and DPIMKDF have `+sha256`, `+sha384`,
 `+sha512`, and `+blake2b-512` aliases; PBKDF2 has `+sha256`, `+sha384`, and
-`+sha512` aliases. Buddy's misspelled `+sha386` aliases are kept and throw, as
-they always did, naming `:sha386`. The generic form is the complete digest interface.
+`+sha512` aliases. Buddy's misspelled `+sha386` aliases also resolve to
+SHA-384 (in Buddy they always threw). The generic form is the complete digest interface.
 
 ### Authenticated encryption and stateful ciphers
 
@@ -255,7 +255,9 @@ an RSA private key. For an n/e/d-only private JWK, the port tries at most 100
 candidate bases while recovering the factors and CRT values, then validates the
 key. This bounded, fail-closed recovery can reject an exotic but valid key.
 Private JWKs that already supply the complete CRT fields (`p`, `q`, `dp`, `dq`,
-and `qi`) are validated directly and bypass recovery.
+and `qi`) are validated directly and bypass recovery. `keys/jwk` writes the CRT
+fields for every RSA private key except one read from an n/e/d-only JWK, which
+it writes back as n/e/d.
 
 ### Certificates
 

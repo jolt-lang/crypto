@@ -58,20 +58,14 @@
     (instance? OpenSSLCipherEngine engine) engine
     (fn? engine) (engine)))
 
-(defn- update-chunks [chunks input offset length]
+(defn- check-mac-window [input offset length]
   (let [input-length (count input)]
     (when (or (neg? offset)
               (neg? length)
               (> offset input-length)
               (> length (- input-length offset)))
       (throw (ex-info "Invalid MAC update window"
-                      {:offset offset :length length :input-length input-length})))
-    (swap! chunks conj (bytes/slice input offset (+ offset length)))
-    nil))
-
-(defn- reset-chunks [chunks]
-  (clojure.core/reset! chunks [])
-  nil)
+                      {:offset offset :length length :input-length input-length})))))
 
 ;; ctx holds a native incremental HMAC context once the first update arrives,
 ;; so a stream is MACed in constant memory. end!, reset! and init! free it.
@@ -92,13 +86,7 @@
   (-reset [_]
     (free-hmac! ctx))
   (-update [_ input offset length]
-    (let [input-length (count input)]
-      (when (or (neg? offset)
-                (neg? length)
-                (> offset input-length)
-                (> length (- input-length offset)))
-        (throw (ex-info "Invalid MAC update window"
-                        {:offset offset :length length :input-length input-length}))))
+    (check-mac-window input offset length)
     (let [c (or @ctx (clojure.core/reset! ctx (openssl/hmac-context algorithm @key)))]
       (openssl/hmac-update! c algorithm (bytes/slice input offset (+ offset length)))
       nil))
@@ -107,7 +95,16 @@
       (clojure.core/reset! ctx nil)
       (openssl/hmac-finish! c algorithm))))
 
-(defrecord OpenSSLPoly1305Engine [cipher key iv chunks]
+;; ctx holds a native incremental Poly1305 context once the first update
+;; arrives, so a stream is MACed in constant memory. end!, reset! and init!
+;; free it.
+(defn- free-poly1305! [ctx]
+  (when-let [c @ctx]
+    (clojure.core/reset! ctx nil)
+    (openssl/free-poly1305-context! c))
+  nil)
+
+(defrecord OpenSSLPoly1305Engine [cipher key iv ctx]
   IEngineInit
   (-init [_ options]
     (let [key-bytes (codecs/to-bytes (:key options))
@@ -118,20 +115,23 @@
       (when-not (= 16 (count iv-bytes))
         (throw (ex-info "Wrong iv length (should be 16 bytes)"
                         {:iv-length (count iv-bytes)})))
+      (free-poly1305! ctx)
       (clojure.core/reset! key (bytes/copy key-bytes))
       (clojure.core/reset! iv (bytes/copy iv-bytes))
-      (reset-chunks chunks)))
+      nil))
 
   IEngine
   (-reset [_]
-    (reset-chunks chunks))
+    (free-poly1305! ctx))
   (-update [_ input offset length]
-    (update-chunks chunks input offset length))
-  (-end [this]
-    (try
-      (openssl/poly1305-aes-bytes @key @iv (apply bytes/concat @chunks))
-      (finally
-        (-reset this)))))
+    (check-mac-window input offset length)
+    (let [c (or @ctx (clojure.core/reset! ctx (openssl/poly1305-aes-context @key @iv)))]
+      (openssl/poly1305-update! c (bytes/slice input offset (+ offset length)))
+      nil))
+  (-end [_]
+    (let [c (or @ctx (openssl/poly1305-aes-context @key @iv))]
+      (clojure.core/reset! ctx nil)
+      (openssl/poly1305-finish! c))))
 
 (defn- digest-algorithm [digest]
   (let [resolved (hash/resolve-digest-engine digest)
@@ -149,7 +149,7 @@
   (when-not (= :aes (:algorithm cipher))
     (throw (ex-info (str "Unsupported Poly1305 cipher: " (or (:algorithm cipher) cipher))
                     {:cipher (or (:algorithm cipher) cipher)})))
-  (->OpenSSLPoly1305Engine cipher (atom nil) (atom nil) (atom [])))
+  (->OpenSSLPoly1305Engine cipher (atom nil) (atom nil) (atom nil)))
 
 (defmethod engine :hmac
   [options]
