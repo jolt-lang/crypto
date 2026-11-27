@@ -678,7 +678,7 @@
     (throw (ex-info (str "unsupported Signature algorithm: " algo) {:algo algo}))))
 
 (defn- digest-spec [algo]
-  (case (str algo) ("SHA-512" "SHA512") [c-sha512 64] ("SHA-384" "SHA384") [c-sha384 48]
+  (case (str/upper-case (str algo)) ("SHA-512" "SHA512") [c-sha512 64] ("SHA-384" "SHA384") [c-sha384 48]
     ("SHA-256" "SHA256") [c-sha256 32] ("SHA-224" "SHA224") [c-sha224 28] ("SHA-1" "SHA1") [c-sha1 20]
     ("MD5") [c-md5 16]
     (throw (ex-info (str "unsupported MessageDigest algorithm: " algo) {:algo algo}))))
