@@ -5,6 +5,7 @@
             [jolt.crypto.bytes :as crypto-bytes]
             [jolt.crypto.crypto :as buddy-crypto]
             [jolt.crypto.bytes-test]
+            [jolt.x25519-test]
             [jolt.crypto.codecs-test]
             [jolt.crypto.padding-test]
             [jolt.crypto.nonce-test]
@@ -759,7 +760,7 @@
     (check "getInstanceStrong returns a working generator"
            (int? (.nextInt (java.security.SecureRandom/getInstanceStrong) 100))))
 
-  (let [{:keys [fail error]} (t/run-tests 'jolt.crypto.bytes-test
+  (let [{:keys [fail error]} (t/run-tests 'jolt.x25519-test 'jolt.crypto.bytes-test
                                           'jolt.crypto.codecs-test
                                           'jolt.crypto.padding-test
                                           'jolt.crypto.nonce-test

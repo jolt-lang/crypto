@@ -121,6 +121,7 @@
   (case (pkey-type pkey)
     "Ed25519" "EdDSA"
     "Ed448" "EdDSA"
+    "X25519" "XDH"
     (pkey-type pkey)))
 
 (defn- check-key-algo
@@ -278,18 +279,17 @@
 (def ^:private nid-ed25519 1087)
 (def ^:private nid-ed448 1088)
 
-(defn generate-ed25519-keypair
-  "Generate an Ed25519 keypair. Returns {:public <X.509 DER> :private <PKCS#8 DER>},
-  the same two encodings the JVM's getEncoded hands back."
-  []
-  (let [ctx (lc/c-pkey-ctx-new-id nid-ed25519 ffi/null)]
-    (when (ffi/null? ctx) (throw (ex-info "Ed25519 key setup failed" {})))
+(def ^:private nid-x25519 1034)
+
+(defn- generate-evp-keypair [nid]
+  (let [ctx (lc/c-pkey-ctx-new-id nid ffi/null)]
+    (when (ffi/null? ctx) (throw (ex-info "EVP key setup failed" {:nid nid})))
     (try
-      (when (not= 1 (lc/c-pkey-keygen-init ctx)) (throw (ex-info "Ed25519 keygen init failed" {})))
+      (when (not= 1 (lc/c-pkey-keygen-init ctx)) (throw (ex-info "EVP keygen init failed" {:nid nid})))
       (let [holder (ffi/alloc ptr-size)]
         (try
           (ffi/write holder :pointer ffi/null 0)
-          (when (not= 1 (lc/c-pkey-keygen ctx holder)) (throw (ex-info "Ed25519 key generation failed" {})))
+          (when (not= 1 (lc/c-pkey-keygen ctx holder)) (throw (ex-info "EVP key generation failed" {:nid nid})))
           (let [pkey (ffi/read holder :pointer)]
             (try
               (let [p8 (lc/c-pkey->p8 pkey)]
@@ -299,6 +299,11 @@
               (finally (lc/c-pkey-free pkey))))
           (finally (ffi/free holder))))
       (finally (lc/c-pkey-ctx-free ctx)))))
+
+(defn generate-ed25519-keypair
+  "Generate Ed25519 public X.509 and private PKCS#8 DER encodings."
+  []
+  (generate-evp-keypair nid-ed25519))
 
 ;; --- JWK key parameter boundary ---------------------------------------------
 ;; These functions are public only so the jwk namespaces can share the existing
@@ -640,12 +645,13 @@
   (let [{:keys [public private]} (case (tget self :algo)
                                    "RSA" (generate-rsa-keypair (tget self :bits))
                                    "EdDSA" (generate-ed25519-keypair)
+                                   "XDH" (generate-evp-keypair nid-x25519)
                                    (generate-ec-keypair (tget self :curve)))]
     (doto (tt :jolt.crypto/keypair)
       (tput! :public public)
       (tput! :private private)
       (tput! :algo (tget self :algo))
-      (tput! :key-type (if (= "EdDSA" (tget self :algo)) "Ed25519" (tget self :algo))))))
+      (tput! :key-type (case (tget self :algo) "EdDSA" "Ed25519" "XDH" "X25519" (tget self :algo))))))
 
 (def ^:private rsa-pkcs1-pss-padding 6)
 (def ^:private rsa-pss-saltlen-digest -1)
@@ -1026,6 +1032,7 @@
     "RSA" (doto (tt :jolt.crypto/keypair-gen)
             (tput! :algo "RSA") (tput! :bits 2048))
     ;; the JDK's EdDSA generator defaults to Ed25519
+    "X25519" (doto (tt :jolt.crypto/keypair-gen) (tput! :algo "XDH"))
     ("ED25519" "EDDSA") (doto (tt :jolt.crypto/keypair-gen) (tput! :algo "EdDSA"))
     (throw (ex-info (str "unsupported KeyPairGenerator algorithm: " algo) {:algo algo}))))
 
@@ -1056,8 +1063,8 @@
   [self spec & _]
   (case (tget self :algo)
     ;; Ed25519 has one size: 255 bits, as the JDK takes it
-    "EdDSA" (when-not (and (not (table? spec)) (= 255 (long spec)))
-              (throw (ex-info (str "unsupported EdDSA parameter: " spec) {:spec spec})))
+    ("XDH" "EdDSA") (when-not (and (not (table? spec)) (= 255 (long spec)))
+              (throw (ex-info (str "unsupported 255-bit key parameter: " spec) {:spec spec})))
     "RSA" (initialize-rsa-generator! self spec)
     (initialize-ec-generator! self spec))
   nil)
@@ -1099,6 +1106,8 @@
                          "EC" (doto (tt :jolt.crypto/key-factory) (tput! :algo "EC"))
                          "RSA" (doto (tt :jolt.crypto/key-factory) (tput! :algo "RSA"))
                          "DSA" (doto (tt :jolt.crypto/key-factory) (tput! :algo "DSA"))
+                         "X25519" (doto (tt :jolt.crypto/key-factory)
+                                    (tput! :algo "XDH") (tput! :key-type "X25519"))
                          "ED25519" (doto (tt :jolt.crypto/key-factory)
                                      (tput! :algo "EdDSA") (tput! :key-type "Ed25519"))
                          "EDDSA" (doto (tt :jolt.crypto/key-factory) (tput! :algo "EdDSA"))
@@ -1116,6 +1125,54 @@
                            (check-key-type self key)))
      "getAlgorithm" (fn [self] (tget self :algo))})
   nil)
+
+(defn- derive-x25519 [private-key public-key]
+  (with-der-key lc/c-d2i-privkey (->ba private-key)
+    (fn [priv]
+      (with-der-key lc/c-d2i-pubkey (->ba public-key)
+        (fn [pub]
+          (let [ctx (lc/c-pkey-ctx-new priv ffi/null)]
+            (when (ffi/null? ctx) (throw (ex-info "X25519 context setup failed" {})))
+            (try
+              (when-not (and (= 1 (lc/c-derive-init ctx)) (= 1 (lc/c-derive-peer ctx pub)))
+                (throw (ex-info "X25519 peer setup failed" {})))
+              (let [out (ffi/alloc 32) size (ffi/alloc ptr-size)]
+                (try
+                  (ffi/write size :size_t 32 0)
+                  (when-not (and (= 1 (lc/c-derive ctx out size)) (= 32 (ffi/read size :size_t)))
+                    (throw (ex-info "X25519 key agreement failed" {})))
+                  (ffi/read-array out 32)
+                  (finally (ffi/free size) (ffi/free out))))
+              (finally (lc/c-pkey-ctx-free ctx)))))))))
+
+(defn- install-key-agreement! []
+  (doseq [nm ["KeyAgreement" "javax.crypto.KeyAgreement"]]
+    (__register-class-statics! nm
+      {"getInstance" (fn [algo]
+                       (when-not (= "X25519" (str/upper-case algo))
+                         (throw (ex-info "Unsupported KeyAgreement algorithm" {:algo algo})))
+                       (tt :jolt.crypto/key-agreement))}))
+  (__register-class-methods! :jolt.crypto/key-agreement
+    {"getAlgorithm" (fn [_] "X25519")
+     "init" (fn [self key]
+              (when-not (and (= :jolt.crypto/private-key (tget key :jolt/type))
+                             (= "X25519" (key-type key)))
+                (throw (ex-info "Expected X25519 private key" {})))
+              (tput! self :private key)
+              (tput! self :secret nil)
+              nil)
+     "doPhase" (fn [self peer last-phase]
+                 (when-not (and (tget self :private) (nil? (tget self :secret))
+                                last-phase (= :jolt.crypto/public-key (tget peer :jolt/type))
+                                (= "X25519" (key-type peer)))
+                   (throw (ex-info "Expected a final X25519 phase with a public key" {})))
+                 (tput! self :secret (derive-x25519 (tget self :private) peer))
+                 nil)
+     "generateSecret" (fn [self]
+                        (let [secret (tget self :secret)]
+                          (when-not secret (throw (ex-info "X25519 phase is incomplete" {})))
+                          (tput! self :secret nil)
+                          secret))}))
 
 (defn- install-signature!
   "java.security.Signature, stateful like Cipher: init picks key and
@@ -1162,6 +1219,7 @@
   (install-key-specs!)
   (install-keypair-generator!)
   (install-key-factory!)
+  (install-key-agreement!)
   (install-signature!)
   (x509/install!)
   nil)
