@@ -8,8 +8,9 @@
     MessageDigest SHA-512 / SHA-384 / SHA-256 / SHA-224 / SHA-1 / MD5
     SecureRandom  RAND_bytes
     SecretKeySpec / IvParameterSpec   key + IV holders
-    KeyPairGenerator / Signature   EC over the NIST P-curves, RSA and Ed25519
-    KeyFactory   those algorithms plus DSA and Ed448, with X509EncodedKeySpec /
+    KeyPairGenerator   EC over the NIST P-curves, RSA and Ed25519
+    Signature      ECDSA, RSA PKCS#1 v1.5/PSS, Ed25519 and Ed448
+    KeyFactory   EC/RSA/DSA/Ed25519/Ed448, with X509EncodedKeySpec /
                   PKCS8EncodedKeySpec / ECGenParameterSpec and PEM decoding
     CertificateFactory   X.509 certificates from PEM or DER, as X509Certificate
                   values (subject/issuer X500Principal, validity, serial,
@@ -82,6 +83,9 @@
 (ffi/defcfn c-dgst-sign        "EVP_DigestSign"       [:pointer :pointer :pointer :pointer :size_t] :int)
 (ffi/defcfn c-dgst-verify-init "EVP_DigestVerifyInit" [:pointer :pointer :pointer :pointer :pointer] :int)
 (ffi/defcfn c-dgst-verify      "EVP_DigestVerify"     [:pointer :pointer :size_t :pointer :size_t] :int)
+(ffi/defcfn c-rsa-padding      "EVP_PKEY_CTX_set_rsa_padding" [:pointer :int] :int)
+(ffi/defcfn c-rsa-pss-saltlen  "EVP_PKEY_CTX_set_rsa_pss_saltlen" [:pointer :int] :int)
+(ffi/defcfn c-rsa-mgf1-md      "EVP_PKEY_CTX_set_rsa_mgf1_md" [:pointer :pointer] :int)
 
 ;; RSA keygen. RSA_generate_key_ex takes the public exponent as a BIGNUM, so a
 ;; BN_new/BN_set_word pair sets the usual 65537 (F4) before the call.
@@ -626,58 +630,99 @@
       (tput! :algo (tget self :algo))
       (tput! :key-type (if (= "EdDSA" (tget self :algo)) "Ed25519" (tget self :algo))))))
 
+(def ^:private rsa-pkcs1-pss-padding 6)
+(def ^:private rsa-pss-saltlen-digest -1)
+
+(defn- configure-pss! [pctx md-fn]
+  (when (ffi/null? pctx)
+    (throw (ex-info "RSA-PSS context initialization failed" {})))
+  (when (not= 1 (c-rsa-padding pctx rsa-pkcs1-pss-padding))
+    (throw (ex-info "RSA-PSS padding setup failed" {})))
+  (when (not= 1 (c-rsa-mgf1-md pctx (md-fn)))
+    (throw (ex-info "RSA-PSS MGF1 setup failed" {})))
+  (when (not= 1 (c-rsa-pss-saltlen pctx rsa-pss-saltlen-digest))
+    (throw (ex-info "RSA-PSS salt length setup failed" {}))))
+
+(defn- check-signature-options [pkey want-algo options]
+  (check-key-algo want-algo (pkey-algo pkey))
+  (when-let [want-type (:key-type options)]
+    (check-key-algo want-type (pkey-type pkey))))
+
 (defn pkey-sign
-  "Sign `data` with a PKCS#8 DER private key, digesting with md-fn (nil for
-  Ed25519, which hashes internally). The result is what Signature.sign returns
-  on the JVM for that key: a DER-encoded ECDSA SEQUENCE of r and s for an EC
-  key, the raw PKCS#1 v1.5 ciphertext for RSA, the 64-byte RFC 8032 signature
-  for Ed25519.
-  EVP picks the primitive from the key itself, so the same call serves both —
-  and so `want-algo`, when given, is what stops a key of the other algorithm
-  producing a signature the named algorithm did not ask for."
-  ([md-fn priv-der data] (pkey-sign md-fn priv-der data nil))
-  ([md-fn priv-der data want-algo]
+  "Sign `data` with a PKCS#8 DER private key. A nil digest selects PureEdDSA's
+  one-shot operation for Ed25519 and Ed448. Options may select RSA-PSS (with
+  MGF1 and salt length both tied to the message digest) and a concrete EdDSA
+  key type. Native contexts are released on every exit path."
+  ([md-fn priv-der data] (pkey-sign md-fn priv-der data nil nil))
+  ([md-fn priv-der data want-algo] (pkey-sign md-fn priv-der data want-algo nil))
+  ([md-fn priv-der data want-algo options]
    (with-der-key c-d2i-privkey priv-der
      (fn [pkey]
-       (check-key-algo want-algo (pkey-algo pkey))
-       (let [data (as-ba data) dn (alength data)
-             ctx (c-md-ctx-new) dp (ffi/alloc (max 1 dn)) lenp (ffi/alloc 8)]
+       (check-signature-options pkey want-algo options)
+       (let [data (as-ba data) dn (alength data) ctx (c-md-ctx-new)]
+         (when (ffi/null? ctx)
+           (throw (ex-info "signature context allocation failed" {})))
          (try
-           (ffi/write-array dp data)
-           (when (not= 1 (c-dgst-sign-init ctx ffi/null (if md-fn (md-fn) ffi/null) ffi/null pkey))
-             (throw (ex-info "signature init failed" {})))
-           ;; a null signature buffer asks for the maximum size rather than signing
-           (ffi/write lenp :size_t 0 0)
-           (when (not= 1 (c-dgst-sign ctx ffi/null lenp dp dn))
-             (throw (ex-info "signature sizing failed" {})))
-           (let [sigp (ffi/alloc (ffi/read lenp :size_t))]
-             (try
-               (when (not= 1 (c-dgst-sign ctx sigp lenp dp dn))
-                 (throw (ex-info "signing failed" {})))
-               (ffi/read-array sigp (ffi/read lenp :size_t))
-               (finally (ffi/free sigp))))
-           (finally (c-md-ctx-free ctx) (ffi/free dp) (ffi/free lenp))))))))
+           (with-ptrs [data]
+             (fn [dp]
+               (let [lenp (ffi/alloc 8)]
+                 (try
+                   (let [pctxp (ffi/alloc ptr-size)]
+                     (try
+                       (ffi/write pctxp :pointer ffi/null 0)
+                       (when (not= 1 (c-dgst-sign-init ctx pctxp (if md-fn (md-fn) ffi/null) ffi/null pkey))
+                         (throw (ex-info "signature init failed" {})))
+                       (when (:pss options)
+                         (configure-pss! (ffi/read pctxp :pointer) md-fn))
+                       ;; a null signature buffer asks for the maximum size rather than signing
+                       (ffi/write lenp :size_t 0 0)
+                       (when (not= 1 (c-dgst-sign ctx ffi/null lenp dp dn))
+                         (throw (ex-info "signature sizing failed" {})))
+                       (let [sigp (ffi/alloc (ffi/read lenp :size_t))]
+                         (try
+                           (when (not= 1 (c-dgst-sign ctx sigp lenp dp dn))
+                             (throw (ex-info "signing failed" {})))
+                           (ffi/read-array sigp (ffi/read lenp :size_t))
+                           (finally (ffi/free sigp))))
+                       (finally
+                         ;; DigestSignInit transferred pctx ownership to ctx.
+                         (ffi/free pctxp))))
+                   (finally (ffi/free lenp))))))
+           (finally (c-md-ctx-free ctx))))))))
 
 (defn pkey-verify
-  "Verify a signature over `data` against an X.509 DER public key, digesting
-  with md-fn (nil for Ed25519). The signature format is the key algorithm's
-  (DER ECDSA r/s, raw PKCS#1 v1.5 RSA, 64-byte Ed25519); `want-algo`, when
-  given, holds the key to that algorithm."
-  ([md-fn pub-der data sig] (pkey-verify md-fn pub-der data sig nil))
-  ([md-fn pub-der data sig want-algo]
+  "Verify a signature over `data` against an X.509 DER public key. Ordinary
+  invalid signatures return false. Options have the same PSS and concrete-key
+  meaning as pkey-sign, and native resources are released on every exit path."
+  ([md-fn pub-der data sig] (pkey-verify md-fn pub-der data sig nil nil))
+  ([md-fn pub-der data sig want-algo] (pkey-verify md-fn pub-der data sig want-algo nil))
+  ([md-fn pub-der data sig want-algo options]
    (with-der-key c-d2i-pubkey pub-der
      (fn [pkey]
-       (check-key-algo want-algo (pkey-algo pkey))
+       (check-signature-options pkey want-algo options)
        (let [data (as-ba data) sig (as-ba sig) dn (alength data) sn (alength sig)
-             ctx (c-md-ctx-new) dp (ffi/alloc (max 1 dn)) sp (ffi/alloc (max 1 sn))]
+             ctx (c-md-ctx-new)]
+         (when (ffi/null? ctx)
+           (throw (ex-info "verification context allocation failed" {})))
          (try
-           (ffi/write-array dp data)
-           (ffi/write-array sp sig)
-           (when (not= 1 (c-dgst-verify-init ctx ffi/null (if md-fn (md-fn) ffi/null) ffi/null pkey))
-             (throw (ex-info "verification init failed" {})))
-           ;; a bad signature is a false, not a throw: EVP reports both the same way
-           (= 1 (c-dgst-verify ctx sp sn dp dn))
-           (finally (c-md-ctx-free ctx) (ffi/free dp) (ffi/free sp))))))))
+           (with-ptrs [data sig]
+             (fn [dp sp]
+               (let [pctxp (ffi/alloc ptr-size)]
+                 (try
+                   (ffi/write pctxp :pointer ffi/null 0)
+                   (when (not= 1 (c-dgst-verify-init ctx pctxp (if md-fn (md-fn) ffi/null) ffi/null pkey))
+                     (throw (ex-info "verification init failed" {})))
+                   (when (:pss options)
+                     (configure-pss! (ffi/read pctxp :pointer) md-fn))
+                   ;; a bad signature is a false, not a throw
+                   (let [result (c-dgst-verify ctx sp sn dp dn)]
+                     (when (not= 1 result)
+                       (c-err-clear))
+                     (= 1 result))
+                   (finally
+                     ;; DigestVerifyInit transferred pctx ownership to ctx.
+                     (ffi/free pctxp))))))
+           (finally (c-md-ctx-free ctx))))))))
 
 ;; --- X.509 certificates ------------------------------------------------------
 (defn- with-mem-bio
@@ -877,8 +922,15 @@
     "SHA256WITHRSA"   [c-sha256 "RSA"]
     "SHA224WITHRSA"   [c-sha224 "RSA"]
     "SHA1WITHRSA"     [c-sha1   "RSA"]
-    ;; PureEdDSA hashes internally: no digest, one-shot over the whole message
-    "ED25519"         [nil "EdDSA"]
+    ;; Bouncy Castle's SHA*withRSAandMGF1 uses MGF1 with the same digest and a
+    ;; digest-length salt. OpenSSL needs all three PSS controls set explicitly.
+    "SHA512WITHRSAANDMGF1" [c-sha512 "RSA" {:pss true}]
+    "SHA384WITHRSAANDMGF1" [c-sha384 "RSA" {:pss true}]
+    "SHA256WITHRSAANDMGF1" [c-sha256 "RSA" {:pss true}]
+    ;; PureEdDSA hashes internally: no digest, one-shot over the whole message.
+    ;; Generic EdDSA accepts either curve; concrete names enforce theirs.
+    "ED25519"         [nil "EdDSA" {:key-type "Ed25519"}]
+    "ED448"           [nil "EdDSA" {:key-type "Ed448"}]
     "EDDSA"           [nil "EdDSA"]
     (throw (ex-info (str "unsupported Signature algorithm: " algo) {:algo algo}))))
 
@@ -1207,10 +1259,11 @@
   (doseq [nm ["Signature" "java.security.Signature"]]
     (__register-class-statics! nm
       {"getInstance" (fn [algo & _]
-                       (let [[md key-algo] (signature-spec algo)]
+                       (let [[md key-algo options] (signature-spec algo)]
                          (doto (tt :jolt.crypto/signature)
                            (tput! :md md)
                            (tput! :key-algo key-algo)
+                           (tput! :options options)
                            (tput! :algo (str algo))
                            (tput! :acc []))))}))
   (__register-class-methods! :jolt.crypto/signature
@@ -1222,12 +1275,14 @@
      "sign" (fn [self & _]
               (let [body (concat-bas (tget self :acc))]
                 (tput! self :acc [])
-                (pkey-sign (tget self :md) (tget self :key) body (tget self :key-algo))))
+                (pkey-sign (tget self :md) (tget self :key) body
+                           (tget self :key-algo) (tget self :options))))
      "verify" (fn [self sig & more]
                 (let [body (concat-bas (tget self :acc))
                       sig (if (= 2 (count more)) (ba-window sig (first more) (second more)) sig)]
                   (tput! self :acc [])
-                  (pkey-verify (tget self :md) (tget self :key) body sig (tget self :key-algo))))
+                  (pkey-verify (tget self :md) (tget self :key) body sig
+                               (tget self :key-algo) (tget self :options))))
      "getAlgorithm" (fn [self] (tget self :algo))})
 
   ;; --- X.509 certificates ---------------------------------------------------
