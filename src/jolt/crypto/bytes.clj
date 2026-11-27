@@ -63,7 +63,8 @@
 (defn concat
   "Given N number of byte arrays, concat them in one unique byte array and return it."
   [& parts]
-  (let [length (reduce + 0 (map count parts))
+  (let [parts (remove nil? parts)
+        length (reduce + 0 (map count parts))
         output (byte-array length)]
     (loop [remaining (seq parts)
            offset 0]

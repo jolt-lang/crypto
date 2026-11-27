@@ -28,7 +28,7 @@
                (if (zero? value)
                  length
                  (recur (quot value 2) (inc length))))]
-    (quot (+ bits 7) 8)))
+    (max 1 (quot (+ bits 7) 8))))
 
 (defn b64str->bigint
   "Decode an unsigned big-endian Base64URL integer."

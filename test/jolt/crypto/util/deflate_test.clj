@@ -84,3 +84,11 @@
                  (df/uncompress (byte-array [0 0]) {:nowrap false})))
   (t/is (thrown? java.io.IOException
                  (df/uncompress (byte-array [7])))))
+
+(t/deftest invalid-buffer-sizes-throw-before-decompression
+  (doseq [buffer-size [0 -1 1.5 "1" nil]]
+    (t/testing (pr-str buffer-size)
+      (t/is (thrown-with-msg?
+             clojure.lang.ExceptionInfo
+             #"DEFLATE buffer size must be a positive integer"
+             (df/uncompress (byte-array [7]) {:buffer-size buffer-size}))))))

@@ -515,3 +515,68 @@
                  (exception-data #(crypto/end! engine output 16))))
           (is (= context (last @freed)))
           (is (nil? @holder)))))))
+
+(deftest gcm-invalid-tagsize-frees-an-active-context
+  (let [engine (crypto/block-cipher :aes :gcm)
+        original-free openssl/c-cipher-ctx-free
+        freed (atom [])]
+    (crypto/init! engine {:key (byte-array 16) :iv (byte-array 12) :op :encrypt})
+    (let [holder (:context engine)
+          context @holder]
+      (with-redefs [openssl/c-cipher-ctx-free
+                    (fn [ptr]
+                      (swap! freed conj ptr)
+                      (original-free ptr))]
+        (is (= {:tagsize 64}
+               (exception-data
+                #(crypto/init! engine {:key (byte-array 16) :iv (byte-array 12)
+                                       :tagsize 64 :op :encrypt}))))
+        (is (= [context] @freed))
+        (is (nil? @holder))))))
+
+(deftest truncated-high-level-gcm-decrypt-frees-an-active-context
+  (let [engine (crypto/block-cipher :aes :gcm)
+        original-free openssl/c-cipher-ctx-free
+        freed (atom [])]
+    (crypto/init! engine {:key (byte-array 16) :iv (byte-array 12) :op :decrypt})
+    (let [holder (:context engine)
+          context @holder]
+      (with-redefs [openssl/c-cipher-ctx-free
+                    (fn [ptr]
+                      (swap! freed conj ptr)
+                      (original-free ptr))]
+        (is (= authentication-error
+               (exception-data
+                #(crypto/decrypt-gcm engine (byte-array 15) (byte-array 16)
+                                     (byte-array 12) nil))))
+        (is (= [context] @freed))
+        (is (nil? @holder))))))
+
+(deftest high-level-gcm-helpers-free-context-on-unexpected-failure
+  (doseq [operation [:encrypt :decrypt]]
+    (testing (str operation)
+      (let [engine (crypto/block-cipher :aes :gcm)
+            original-free openssl/c-cipher-ctx-free
+            freed (atom [])]
+        (crypto/init! engine {:key (byte-array 16) :iv (byte-array 12) :op operation})
+        (let [holder (:context engine)
+              old-context @holder]
+          (with-redefs [crypto/get-output-size
+                        (fn [& _]
+                          (throw (ex-info "injected sizing failure"
+                                          {:injected :sizing})))
+                        openssl/c-cipher-ctx-free
+                        (fn [ptr]
+                          (swap! freed conj ptr)
+                          (original-free ptr))]
+            (is (= :sizing
+                   (:injected
+                    (exception-data
+                     #(case operation
+                        :encrypt (crypto/encrypt-gcm engine (byte-array 16)
+                                                     (byte-array 16) (byte-array 12) nil)
+                        :decrypt (crypto/decrypt-gcm engine (byte-array 16)
+                                                     (byte-array 16) (byte-array 12) nil))))))
+            (is (= 2 (count @freed)))
+            (is (some #{old-context} @freed))
+            (is (nil? @holder))))))))

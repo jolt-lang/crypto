@@ -85,24 +85,33 @@
     (throw (ex-info "Length of counter should be 8, 16, 24 or 32" {:r r})))
   r)
 
-(defn- streaming-derive [next-block]
-  (let [counter (atom 1)
-        current (atom nil)
-        offset (atom 0)]
-    (fn [length]
-      (let [output (byte-array length)]
-        (loop [written 0]
-          (if (= written length)
-            output
-            (do
-              (when (or (nil? @current) (= @offset (count @current)))
-                (reset! current (next-block @counter))
-                (swap! counter inc)
-                (reset! offset 0))
-              (let [amount (min (- length written) (- (count @current) @offset))]
-                (System/arraycopy @current @offset output written amount)
-                (swap! offset + amount)
-                (recur (+ written amount))))))))))
+(defn- counter-limit [r]
+  (dec (bit-shift-left 1 r)))
+
+(defn- streaming-derive
+  ([next-block]
+   (streaming-derive next-block nil))
+  ([next-block maximum-counter]
+   (let [counter (atom 1)
+         current (atom nil)
+         offset (atom 0)]
+     (fn [length]
+       (let [output (byte-array length)]
+         (loop [written 0]
+           (if (= written length)
+             output
+             (do
+               (when (or (nil? @current) (= @offset (count @current)))
+                 (when (and maximum-counter (> @counter maximum-counter))
+                   (throw (ex-info "KDF counter exceeds the construction limit"
+                                   {:counter @counter :maximum-counter maximum-counter})))
+                 (reset! current (next-block @counter))
+                 (swap! counter inc)
+                 (reset! offset 0))
+               (let [amount (min (- length written) (- (count @current) @offset))]
+                 (System/arraycopy @current @offset output written amount)
+                 (swap! offset + amount)
+                 (recur (+ written amount)))))))))))
 
 (defn- limited-derive [derive maximum]
   (let [generated (atom 0)]
@@ -128,7 +137,8 @@
                                     (bytes/concat @previous info
                                                   (byte-array [(unchecked-byte counter)])))]
                     (reset! previous block)
-                    block)))]
+                    block))
+                255)]
     (->FunctionalKDF (limited-derive derive (* 255 length)))))
 
 (defmethod engine :hkdf+sha256
@@ -205,13 +215,16 @@
 (defmethod engine :cmkdf
   [{:keys [key salt digest r] :or {r 32}}]
   (validate-counter-width! r)
-  (let [{:keys [algorithm]} (digest-info digest)
+  (let [{:keys [algorithm length]} (digest-info digest)
         key (option-bytes key)
-        salt (option-bytes salt)]
+        salt (option-bytes salt)
+        maximum-counter (counter-limit r)
+        derive (streaming-derive
+                (fn [counter]
+                  (hmac algorithm key (bytes/concat (counter-bytes counter r) salt)))
+                maximum-counter)]
     (->FunctionalKDF
-     (streaming-derive
-      (fn [counter]
-        (hmac algorithm key (bytes/concat (counter-bytes counter r) salt)))))))
+     (limited-derive derive (* maximum-counter length)))))
 
 (defmethod engine :cmkdf+sha256
   [options]
@@ -233,18 +246,23 @@
   [{:keys [key salt digest r counter] :or {r 32 counter true}}]
   (when counter
     (validate-counter-width! r))
-  (let [{:keys [algorithm]} (digest-info digest)
+  (let [{:keys [algorithm length]} (digest-info digest)
         key (option-bytes key)
-        previous (atom (option-bytes salt))]
+        previous (atom (option-bytes salt))
+        maximum-counter (when counter (counter-limit r))
+        derive (streaming-derive
+                (fn [iteration]
+                  (let [input (if counter
+                                (bytes/concat @previous (counter-bytes iteration r))
+                                @previous)
+                        block (hmac algorithm key input)]
+                    (reset! previous block)
+                    block))
+                maximum-counter)]
     (->FunctionalKDF
-     (streaming-derive
-      (fn [iteration]
-        (let [input (if counter
-                      (bytes/concat @previous (counter-bytes iteration r))
-                      @previous)
-              block (hmac algorithm key input)]
-          (reset! previous block)
-          block))))))
+     (if maximum-counter
+       (limited-derive derive (* maximum-counter length))
+       derive))))
 
 (defmethod engine :fmkdf+sha256
   [options]
@@ -266,19 +284,24 @@
   [{:keys [key salt digest r counter] :or {r 32 counter true}}]
   (when counter
     (validate-counter-width! r))
-  (let [{:keys [algorithm]} (digest-info digest)
+  (let [{:keys [algorithm length]} (digest-info digest)
         key (option-bytes key)
         salt (option-bytes salt)
-        a-value (atom salt)]
+        a-value (atom salt)
+        maximum-counter (when counter (counter-limit r))
+        derive (streaming-derive
+                (fn [iteration]
+                  (let [a (hmac algorithm key @a-value)]
+                    (reset! a-value a)
+                    (hmac algorithm key
+                          (if counter
+                            (bytes/concat a (counter-bytes iteration r) salt)
+                            (bytes/concat a salt)))))
+                maximum-counter)]
     (->FunctionalKDF
-     (streaming-derive
-      (fn [iteration]
-        (let [a (hmac algorithm key @a-value)]
-          (reset! a-value a)
-          (hmac algorithm key
-                (if counter
-                  (bytes/concat a (counter-bytes iteration r) salt)
-                  (bytes/concat a salt)))))))))
+     (if maximum-counter
+       (limited-derive derive (* maximum-counter length))
+       derive))))
 
 (defmethod engine :dpimkdf+sha256
   [options]

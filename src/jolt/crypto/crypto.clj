@@ -181,11 +181,16 @@
 (defrecord OpenSSLGCMBlockCipher [algorithm context operation pending]
   ICipherInit
   (-init [this params]
-    (when-not (= 128 (:tagsize params 128))
-      (throw (ex-info "AES-GCM requires a 128-bit authentication tag"
-                      {:tagsize (:tagsize params)})))
-    (reset! pending (byte-array 0))
-    (initialize-native! this algorithm :gcm context operation params))
+    (try
+      (when-not (= 128 (:tagsize params 128))
+        (throw (ex-info "AES-GCM requires a 128-bit authentication tag"
+                        {:tagsize (:tagsize params)})))
+      (reset! pending (byte-array 0))
+      (initialize-native! this algorithm :gcm context operation params)
+      (catch Exception e
+        (reset! pending (byte-array 0))
+        (openssl/free-cipher-context! context)
+        (throw e))))
   (-end [_ out offset]
     (finalize-gcm! context operation pending out offset))
 
@@ -374,27 +379,33 @@
   "Encrypt arbitrary length input and append a 128-bit GCM authentication tag."
   {:internal true :no-doc true}
   [cipher input key iv aad]
-  (-init cipher {:iv iv :key key :tagsize 128 :op :encrypt :aad aad})
-  (let [outputlength (get-output-size cipher (count input))
-        output (byte-array outputlength)
-        offset (process-bytes! cipher input 0 output 0)]
-    (end! cipher output offset)
-    output))
+  (try
+    (-init cipher {:iv iv :key key :tagsize 128 :op :encrypt :aad aad})
+    (let [outputlength (get-output-size cipher (count input))
+          output (byte-array outputlength)
+          offset (process-bytes! cipher input 0 output 0)]
+      (end! cipher output offset)
+      output)
+    (finally
+      (openssl/free-cipher-context! (:context cipher)))))
 
 (defn decrypt-gcm
   "Verify and decrypt input carrying a trailing 128-bit GCM authentication tag."
   {:internal true :no-doc true}
   [cipher ciphertext key iv aad]
-  (when (< (count ciphertext) 16)
-    (throw (ex-info "Couldn't validate gcm authentication tag: truncated input"
-                    {:type :validation :cause :authtag})))
-  (-init cipher {:iv iv :key key :tagsize 128 :op :decrypt :aad aad})
-  (let [input (bytes/copy ciphertext)
-        outputlength (get-output-size cipher (count input))
-        output (byte-array outputlength)
-        offset (process-bytes! cipher input 0 output 0)]
-    (end! cipher output offset)
-    output))
+  (try
+    (when (< (count ciphertext) 16)
+      (throw (ex-info "Couldn't validate gcm authentication tag: truncated input"
+                      {:type :validation :cause :authtag})))
+    (-init cipher {:iv iv :key key :tagsize 128 :op :decrypt :aad aad})
+    (let [input (bytes/copy ciphertext)
+          outputlength (get-output-size cipher (count input))
+          output (byte-array outputlength)
+          offset (process-bytes! cipher input 0 output 0)]
+      (end! cipher output offset)
+      output)
+    (finally
+      (openssl/free-cipher-context! (:context cipher)))))
 
 (defn- aad->bytes [aad]
   (let [length (* (count aad) 8)

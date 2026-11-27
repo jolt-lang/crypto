@@ -72,3 +72,18 @@
   (let [empty-result (bytes/concat)]
     (is (bytes/bytes? empty-result))
     (is (zero? (count empty-result)))))
+
+(deftest concatenation-skips-nil-parts
+  (doseq [[label parts expected]
+          [["first" [nil (byte-array [1 2]) (byte-array [3])] [1 2 3]]
+           ["middle" [(byte-array [1 2]) nil (byte-array [3])] [1 2 3]]
+           ["last" [(byte-array [1 2]) (byte-array [3]) nil] [1 2 3]]]]
+    (testing label
+      (is (= expected (vec (apply bytes/concat parts))))))
+  (testing "all nil and no parts both produce an empty byte array"
+    (let [all-nil (bytes/concat nil nil nil)
+          empty (bytes/concat)]
+      (is (bytes/bytes? all-nil))
+      (is (zero? (alength all-nil)))
+      (is (bytes/bytes? empty))
+      (is (zero? (alength empty))))))

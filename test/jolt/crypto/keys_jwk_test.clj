@@ -364,3 +364,68 @@
                                                  :x "AA" :y "AA" :d "AA"})))
   (is (thrown? Exception (keys/jwk->public-key {:kty "OKP" :crv "X25519" :x "AA"})))
   (is (thrown? Exception (keys/jwk->private-key {:kty "OKP" :crv "X25519" :x "AA" :d "AA"}))))
+
+(deftest zero-jwk-integer-uses-one-zero-octet
+  (is (= 1 (proto/calc-byte-length 0)))
+  (is (= "AA" (proto/bigint->b64str (proto/calc-byte-length 0) 0)))
+  (is (zero? (proto/b64str->bigint "AA")))
+  (testing "positive integers retain minimum-length encoding"
+    (is (= 1 (proto/calc-byte-length 1)))
+    (is (= "AQ" (proto/bigint->b64str 1 1)))
+    (is (= 2 (proto/calc-byte-length 256)))
+    (is (= "AQA" (proto/bigint->b64str 2 256)))))
+
+(deftest rsa-public-jwk-rejects-nonpositive-modulus-and-exponent
+  (doseq [field [:n :e]
+          value ["" "AA" "AAAA"]]
+    (testing (str field " " (pr-str value))
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo
+           #"RSA modulus and public exponent must be positive"
+           (keys/jwk->public-key (assoc rsa-jwk-pubkey field value)))))))
+
+(def ^:private ec-short-scalar-cases
+  [[32 {:kty "EC" :crv "P-256"
+        :x "ZQsaBUQHv_Ptc7wr42wrxM4bJ4JhcR7ElgxqrX9SMio"
+        :y "X8Z3fIw-p9Hp5Ai3WbybiNOpm_jMhDbnfgok91nYhwA"
+        :d "ki23z5BkORHJCL0GoYzlr-7lY0TWAxVWoMPKU1OvdA"}]
+   [48 {:kty "EC" :crv "P-384"
+        :x "piznrNIqkHoMkoNUAaSxSBEDaGgzp5qVGx8rtFh1yOOR1tSzRoI76lYSvkXhMIBt"
+        :y "Pzjqmg5R1g4M_lVWn3qXx54OgvQLtgLf6ggZfdeEa3onxgwkIi-2PcfQLucXuA_m"
+        :d "t5AydHHzpfoQOiFy2MOUJJ17rWnWAR9VrcaMasfSE0zTf97U4io366S6xd1_gFE"}]
+   [66 {:kty "EC" :crv "P-521"
+        :x "AFeQX1no7MJUkelIx3dkKU8iG27MqYpYUI7B-pSrtiE265vHEMHHcImbaon1sF8-j45UCfiZoNWf_0g8_BfDXTSb"
+        :y "ARiOmADv6l2NPHbd9MhStszhXhPajt6lCbMukRmGZKyrBU-aeGgbcnbqrH_khQJqAc1mpm-cYcsw7RLAW7PexoYV"
+        :d "qZTBEZDjNLiyx9qvi4qKcE8VnPPGIxLBGpMxz5aK0dHfOjigatEohSfErrw9Ag0qWWb4aX4aBCtealg3UlwqTHY"}]
+   [32 {:kty "EC" :crv "secp256k1"
+        :x "_EgFvPeOFieZT6BFbkUGjgoszk-YdlcMLf7HyHPOKZs"
+        :y "XqS6O_SVuXqm1Qj_X5u4p_tPJS2xkmNsjUG3HTurQj8"
+        :d "i0XU77CsnxCg_Y7hf3EEI7yWAiDC0k4tklEuG900rQ"}]])
+
+(defn- pad-short-scalar-jwk [width jwk]
+  (let [scalar (b64u (:d jwk))
+        padded (bytes/concat (byte-array (- width (alength scalar))) scalar)]
+    (is (< (alength scalar) width))
+    (assoc jwk :d (b64u-str padded))))
+
+(deftest ec-private-scalar-export-is-left-padded-to-curve-width
+  (doseq [[width short-jwk] ec-short-scalar-cases]
+    (testing (:crv short-jwk)
+      (let [padded-jwk (pad-short-scalar-jwk width short-jwk)
+            [public private] (load-pair padded-jwk)
+            exported (keys/jwk private public)
+            scalar (b64u (:d exported))
+            [round-trip-public round-trip-private] (load-pair exported)]
+        (is (= width (alength scalar)))
+        (is (= padded-jwk exported))
+        (is (= padded-jwk (keys/jwk round-trip-private round-trip-public)))))))
+
+(deftest ec-private-scalar-import-rejects-overlong-leading-zero
+  (doseq [[width short-jwk] ec-short-scalar-cases]
+    (testing (:crv short-jwk)
+      (let [padded-jwk (pad-short-scalar-jwk width short-jwk)
+            overlong (b64u-str (bytes/concat (byte-array [0]) (b64u (:d padded-jwk))))]
+        (is (thrown-with-msg?
+             clojure.lang.ExceptionInfo
+             #"Invalid EC coordinate width"
+             (keys/jwk->private-key (assoc padded-jwk :d overlong))))))))

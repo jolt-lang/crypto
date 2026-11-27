@@ -50,7 +50,7 @@
 (defn- load-private [jwk curve]
   (let [x (decode-coordinate jwk curve :x)
         y (decode-coordinate jwk curve :y)
-        d (codecs/b64->bytes (:d jwk) true)]
+        d (decode-coordinate jwk curve :d)]
     (crypto/ec-private-from-parameters curve d x y)))
 
 (defn- load-public [jwk curve]
@@ -84,8 +84,9 @@
       (throw (ex-info "Public key doesn't match private key"
                       {:expected (select-keys private-public [:crv :x :y])
                        :actual (select-keys public-jwk [:crv :x :y])})))
-    (let [d (proto/b64str->bigint (proto/bytes->b64str (:d private-parameters)))]
-      (assoc public-jwk :d (proto/bigint->b64str (proto/calc-byte-length d) d)))))
+    (let [d (proto/b64str->bigint (proto/bytes->b64str (:d private-parameters)))
+          width (get coordinate-widths (:crv private-parameters))]
+      (assoc public-jwk :d (proto/bigint->b64str width d)))))
 
 ;; https://tools.ietf.org/html/rfc7638#section-3.2
 (defmethod proto/thumbprint "EC"

@@ -51,6 +51,9 @@
   ([^bytes input {:keys [nowrap buffer-size]
                   :or {nowrap true buffer-size 2048}
                   :as opts}]
+   (when-not (and (integer? buffer-size) (pos? buffer-size))
+     (throw (ex-info "DEFLATE buffer size must be a positive integer"
+                     {:buffer-size buffer-size})))
    (let [buf (byte-array (int buffer-size))
          inf (Inflater. nowrap)]
      (try

@@ -138,9 +138,14 @@
 
 (defmethod proto/jwk->public-key "RSA"
   [jwk]
-  (crypto/rsa-public-from-parameters
-   (codecs/b64->bytes (:n jwk) true)
-   (codecs/b64->bytes (:e jwk) true)))
+  (let [n (proto/b64str->bigint (:n jwk))
+        e (proto/b64str->bigint (:e jwk))]
+    (when-not (and (pos? n) (pos? e))
+      (throw (ex-info "RSA modulus and public exponent must be positive"
+                      {:n-positive? (pos? n) :e-positive? (pos? e)})))
+    (crypto/rsa-public-from-parameters
+     (codecs/b64->bytes (:n jwk) true)
+     (codecs/b64->bytes (:e jwk) true))))
 
 (defn- parameters->jwk [{:keys [n e]}]
   (let [n (proto/b64str->bigint (proto/bytes->b64str n))

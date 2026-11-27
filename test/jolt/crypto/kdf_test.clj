@@ -20,7 +20,8 @@
             [jolt.crypto.bytes :as bytes]
             [jolt.crypto.codecs :as codecs]
             [jolt.crypto.internal.openssl :as openssl]
-            [jolt.crypto.kdf :as kdf])
+            [jolt.crypto.kdf :as kdf]
+            [jolt.crypto.mac :as mac])
   (:import java.nio.ByteBuffer))
 
 (def ^:private binary-key
@@ -286,3 +287,65 @@
     (is (= :sha256 (:algorithm (exception-data
                                 #(openssl/pbkdf2-bytes :sha256 (codecs/str->bytes "key")
                                                        (codecs/str->bytes "salt") 2 16)))))))
+
+(def ^:private counter-limit-cases
+  [[:cmkdf 0] [:fmkdf :last] [:dpimkdf 32]])
+
+(defn- counter-octet [algorithm input]
+  (when (or (= :last algorithm) (< algorithm (alength input)))
+    (bit-and 0xff
+             (if (= :last algorithm)
+               (aget input (dec (alength input)))
+               (aget input algorithm)))))
+
+(defn- derive-with-counter-capture [engine algorithm lengths]
+  (let [original-hash mac/hash
+        inputs (atom [])
+        output (with-redefs [mac/hash (fn [data options]
+                                       (swap! inputs conj (bytes/copy data))
+                                       (original-hash data options))]
+                 (apply bytes/concat
+                        (map #(kdf/get-bytes engine %) lengths)))]
+    {:output output
+     :counters (vec (keep #(counter-octet algorithm %) @inputs))}))
+
+(deftest counter-kdfs-stop-at-the-r-bit-boundary-test
+  (doseq [[algorithm counter-position] counter-limit-cases]
+    (testing (str algorithm " one-shot boundary")
+      (let [engine (kdf/engine {:key binary-key :salt binary-salt :alg algorithm
+                                :digest :sha256 :r 8})
+            {:keys [output counters]} (derive-with-counter-capture
+                                       engine counter-position [8160])
+            exhaustion (exception-data #(kdf/get-bytes engine 1))]
+        (is (= (vec (range 1 256)) counters))
+        (is (not-any? zero? counters))
+        (is (= 255 (count (distinct (map vec (partition 32 output))))))
+        (is (= 8160 (:maximum exhaustion)))))))
+
+(deftest counter-kdfs-enforce-exhaustion-across-split-calls-test
+  (doseq [[algorithm counter-position] counter-limit-cases]
+    (testing (str algorithm " split calls")
+      (let [engine (kdf/engine {:key binary-key :salt binary-salt :alg algorithm
+                                :digest :sha256 :r 8})
+            {:keys [output counters]} (derive-with-counter-capture
+                                       engine counter-position [1 8158 1])
+            exhaustion (exception-data #(kdf/get-bytes engine 1))]
+        (is (= 8160 (alength output)))
+        (is (= (vec (range 1 256)) counters))
+        (is (not-any? zero? counters))
+        (is (= 255 (count (distinct (map vec (partition 32 output))))))
+        (is (= 8160 (:maximum exhaustion)))))))
+
+(deftest counter-kdfs-reject-an-over-limit-request-before-generating-test
+  (doseq [[algorithm _] counter-limit-cases]
+    (testing (str algorithm " oversized request")
+      (let [calls (atom 0)
+            original-hash mac/hash
+            engine (kdf/engine {:key binary-key :salt binary-salt :alg algorithm
+                                :digest :sha256 :r 8})
+            exhaustion (with-redefs [mac/hash (fn [data options]
+                                               (swap! calls inc)
+                                               (original-hash data options))]
+                         (exception-data #(kdf/get-bytes engine 8161)))]
+        (is (= 8160 (:maximum exhaustion)))
+        (is (zero? @calls))))))
