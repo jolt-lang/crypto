@@ -77,6 +77,17 @@
 
  :aliases {:test {:extra-paths ["test"]
                   :extra-deps {org.clojure/test.check {:mvn/version "1.1.1"}}
-                  :main-opts ["-m" "jolt.crypto-test"]}}
+                  :main-opts ["-m" "jolt.crypto-test"]}
+           ;; the code metrics report CI publishes; see ci/metrics-allow.edn
+           :metrics {:extra-deps {io.github.jlt-commons/jolt-metrics
+                                  {:git/url "https://github.com/jlt-commons/jolt-metrics"
+                                   :git/tag "v0.8.2"
+                                   :git/sha "8333fa0faac6776276a043791ea13a64d9c35757"}}
+                     :main-opts ["-m" "metrics.cli"]}}
 
- :tasks {test "jolt -M:test"}}
+ :tasks {test "jolt -M:test"
+         metrics {:doc "print the jolt-metrics report"
+                  :task "jolt -M:metrics ."}
+         metrics-gate {:doc "run the CI metrics gate on this checkout"
+                       :task (do (shell "jolt -M:metrics . metrics-report.edn --format edn --no-abstractions")
+                                 (shell "jolt ci/metrics-gate.clj metrics-report.edn ci/metrics-allow.edn"))}}}

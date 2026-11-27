@@ -9,6 +9,21 @@ matching `:git/sha`.
 
 ## [Unreleased]
 
+### Added
+
+- CI runs jolt-metrics and fails on a new critical finding, unused code or a
+  lint warning (`ci/metrics-gate.clj`, adapted from jolt's). The findings that
+  were already there at 0.4.1 are allowlisted at their current values: six
+  critical ones, among them `install!` and the 1432-line `jolt/crypto.clj`, plus
+  an unused public function and four `:refer :all` lints in the ported tests.
+  `jolt run metrics` prints the report and
+  `jolt run metrics-gate` runs the check locally.
+
+### Fixed
+
+- `concat-bas` had its docstring after the parameter vector, so it was a string
+  in the body instead of the docstring.
+
 ## [0.4.1] - 2026-11-27
 
 ### Fixed

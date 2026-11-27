@@ -1,3 +1,5 @@
 .jolt/
 .cpcache/
 .worktrees/
+metrics-report.edn
+metrics-report.md
