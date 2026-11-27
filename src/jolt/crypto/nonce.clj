@@ -12,8 +12,8 @@
 ;; See the License for the specific language governing permissions and
 ;; limitations under the License.
 ;;
-;; Modified in 2026 for Jolt: replaced Bouncy Castle dispatch types with a
-;; block-size fallback and used the existing OpenSSL-backed CSPRNG.
+;; Modified in 2026 for Jolt: replaced Bouncy Castle dispatch types with
+;; OpenSSL engine classes, a block-size fallback, and the existing CSPRNG.
 
 (ns jolt.crypto.nonce
   "Namespace dedicated to provide an abstraction
@@ -21,7 +21,8 @@
 
   By convenience, it also exposes additional functions
   for generate random iv/salts."
-  (:require [jolt.crypto :as crypto]))
+  (:require [jolt.crypto :as crypto]
+            [jolt.crypto.crypto :as cipher]))
 
 (defn random-bytes
   "Generate a byte array of specified length with random
@@ -56,3 +57,9 @@
 
 (defmethod for-engine :default [engine]
   (random-bytes (.getBlockSize engine)))
+
+(defmethod for-engine cipher/OpenSSLBlockCipher [_]
+  (random-bytes 16))
+
+(defmethod for-engine cipher/OpenSSLStreamCipher [_]
+  (random-bytes 8))

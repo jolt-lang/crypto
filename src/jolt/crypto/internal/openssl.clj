@@ -8,11 +8,26 @@
 (ffi/defcfn c-hmac "HMAC" [:pointer :pointer :int :pointer :size_t :pointer :pointer] :pointer)
 (ffi/defcfn c-pbkdf2-hmac "PKCS5_PBKDF2_HMAC" [:pointer :int :pointer :int :int :pointer :int :pointer] :int :blocking)
 (ffi/defcfn c-aes-128-ecb "EVP_aes_128_ecb" [] :pointer)
+(ffi/defcfn c-aes-192-ecb "EVP_aes_192_ecb" [] :pointer)
+(ffi/defcfn c-aes-256-ecb "EVP_aes_256_ecb" [] :pointer)
+(ffi/defcfn c-aes-128-cbc "EVP_aes_128_cbc" [] :pointer)
+(ffi/defcfn c-aes-192-cbc "EVP_aes_192_cbc" [] :pointer)
+(ffi/defcfn c-aes-256-cbc "EVP_aes_256_cbc" [] :pointer)
+(ffi/defcfn c-aes-128-ctr "EVP_aes_128_ctr" [] :pointer)
+(ffi/defcfn c-aes-192-ctr "EVP_aes_192_ctr" [] :pointer)
+(ffi/defcfn c-aes-256-ctr "EVP_aes_256_ctr" [] :pointer)
+(ffi/defcfn c-aes-128-ofb "EVP_aes_128_ofb" [] :pointer)
+(ffi/defcfn c-aes-192-ofb "EVP_aes_192_ofb" [] :pointer)
+(ffi/defcfn c-aes-256-ofb "EVP_aes_256_ofb" [] :pointer)
+(ffi/defcfn c-chacha20 "EVP_chacha20" [] :pointer)
 (ffi/defcfn c-cipher-ctx-new "EVP_CIPHER_CTX_new" [] :pointer)
 (ffi/defcfn c-cipher-ctx-free "EVP_CIPHER_CTX_free" [:pointer] :void)
 (ffi/defcfn c-encrypt-init "EVP_EncryptInit_ex" [:pointer :pointer :pointer :pointer :pointer] :int)
 (ffi/defcfn c-encrypt-update "EVP_EncryptUpdate" [:pointer :pointer :pointer :pointer :int] :int)
 (ffi/defcfn c-encrypt-final "EVP_EncryptFinal_ex" [:pointer :pointer :pointer] :int)
+(ffi/defcfn c-decrypt-init "EVP_DecryptInit_ex" [:pointer :pointer :pointer :pointer :pointer] :int)
+(ffi/defcfn c-decrypt-update "EVP_DecryptUpdate" [:pointer :pointer :pointer :pointer :int] :int)
+(ffi/defcfn c-decrypt-final "EVP_DecryptFinal_ex" [:pointer :pointer :pointer] :int)
 (ffi/defcfn c-cipher-set-padding "EVP_CIPHER_CTX_set_padding" [:pointer :int] :int)
 (ffi/defcfn c-pkey-new-mac-key "EVP_PKEY_new_mac_key" [:int :pointer :pointer :int] :pointer)
 (ffi/defcfn c-pkey-free "EVP_PKEY_free" [:pointer] :void)
@@ -139,6 +154,122 @@
               (ffi/read-array output length)
               (finally
                 (ffi/free output)))))))))
+
+(def ^:private aes-ciphers
+  {:ecb {16 c-aes-128-ecb 24 c-aes-192-ecb 32 c-aes-256-ecb}
+   :cbc {16 c-aes-128-cbc 24 c-aes-192-cbc 32 c-aes-256-cbc}
+   :ctr {16 c-aes-128-ctr 24 c-aes-192-ctr 32 c-aes-256-ctr}
+   :ofb {16 c-aes-128-ofb 24 c-aes-192-ofb 32 c-aes-256-ofb}})
+
+(defn- cipher-operations [op]
+  (case op
+    :encrypt [c-encrypt-init c-encrypt-update c-encrypt-final]
+    :decrypt [c-decrypt-init c-decrypt-update c-decrypt-final]
+    (throw (ex-info (str "Unsupported cipher operation: " op) {:op op}))))
+
+(defn cipher-context
+  "Create an initialized, unpadding EVP context for a Buddy low-level engine."
+  [algorithm mode op key iv]
+  (let [key (as-bytes key)
+        iv (when (some? iv) (as-bytes iv))
+        mode (if (= :sic mode) :ctr mode)
+        key-length (alength key)
+        iv-length (count iv)]
+    (when (and (= :chacha algorithm) (not= 32 key-length))
+      (throw (ex-info "ChaCha key must be 32 bytes" {:key-length key-length})))
+    (when (= :aes algorithm)
+      (when-not (#{16 24 32} key-length)
+        (throw (ex-info "AES key must be 16, 24, or 32 bytes"
+                        {:key-length key-length})))
+      (when (and (= :ecb mode) (some? iv))
+        (throw (ex-info "ECB mode does not use an IV" {:mode :ecb})))
+      (when (and (not= :ecb mode) (not= 16 iv-length))
+        (throw (ex-info "AES IV must be 16 bytes" {:iv-length iv-length}))))
+    (when (and (= :chacha algorithm) (not= 8 iv-length))
+      (throw (ex-info "ChaCha nonce must be 8 bytes" {:iv-length iv-length})))
+    (let [cipher-fn (case algorithm
+                      :aes (or (get-in aes-ciphers [mode key-length])
+                               (throw (ex-info (str "Unsupported AES mode: " mode)
+                                               {:algorithm algorithm :mode mode})))
+                      :chacha c-chacha20
+                      (throw (ex-info (str "Unsupported cipher algorithm: " algorithm)
+                                      {:algorithm algorithm})))
+          native-iv (if (= :chacha algorithm)
+                      (bytes/concat (byte-array 8) iv)
+                      iv)
+          inputs (if native-iv [key native-iv] [key])
+          [init _ _] (cipher-operations op)
+          ctx (c-cipher-ctx-new)]
+      (when (ffi/null? ctx)
+        (throw (ex-info "OpenSSL cipher context allocation failed"
+                        {:algorithm algorithm :mode mode})))
+      (try
+        (with-byte-ptrs inputs
+          (fn [& ptrs]
+            (let [key-ptr (first ptrs)
+                  iv-ptr (or (second ptrs) ffi/null)]
+              (when-not (= 1 (init ctx (cipher-fn) ffi/null key-ptr iv-ptr))
+                (throw (ex-info "OpenSSL cipher initialization failed"
+                                {:algorithm algorithm :mode mode :op op})))
+              (when-not (= 1 (c-cipher-set-padding ctx 0))
+                (throw (ex-info "OpenSSL cipher padding configuration failed"
+                                {:algorithm algorithm :mode mode}))))))
+        ctx
+        (catch Exception e
+          (c-cipher-ctx-free ctx)
+          (throw e))))))
+
+(defn free-cipher-context!
+  "Detach and release an engine's native context, if present."
+  [holder]
+  (when-let [ctx @holder]
+    (reset! holder nil)
+    (c-cipher-ctx-free ctx))
+  nil)
+
+(defn cipher-update
+  "Process exactly one input window and return the same number of bytes."
+  [ctx op input]
+  (let [input (as-bytes input)
+        length (alength input)
+        [_ update _] (cipher-operations op)]
+    (with-byte-ptrs [input]
+      (fn [input-ptr]
+        (let [output (ffi/alloc (max 1 (+ length 16)))]
+          (try
+            (let [output-length (ffi/alloc 4)]
+              (try
+                (when-not (= 1 (update ctx output output-length input-ptr length))
+                  (throw (ex-info "OpenSSL cipher update failed" {:op op})))
+                (let [actual-length (ffi/read output-length :int)]
+                  (when-not (= length actual-length)
+                    (throw (ex-info "OpenSSL cipher returned an unexpected output length"
+                                    {:op op :expected length :actual actual-length})))
+                  (ffi/read-array output actual-length))
+                (finally
+                  (ffi/free output-length))))
+            (finally
+              (ffi/free output))))))))
+
+(defn cipher-final
+  "Finalize a non-AEAD EVP context, which must not emit additional bytes."
+  [ctx op]
+  (let [[_ _ final] (cipher-operations op)
+        output (ffi/alloc 16)]
+    (try
+      (let [output-length (ffi/alloc 4)]
+        (try
+          (when-not (= 1 (final ctx output output-length))
+            (throw (ex-info "OpenSSL cipher finalization failed" {:op op})))
+          (let [actual-length (ffi/read output-length :int)]
+            (when-not (zero? actual-length)
+              (throw (ex-info "Non-AEAD cipher finalization emitted bytes"
+                              {:op op :actual actual-length})))
+            0)
+          (finally
+            (ffi/free output-length))))
+      (finally
+        (ffi/free output)))))
 
 (defn- aes-128-ecb-block [key block]
   (with-byte-ptrs [key block]
