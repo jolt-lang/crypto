@@ -9,9 +9,11 @@ matching `:git/sha`.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-27
+
 ### Added
 
-- **Buddy-compatible OpenSSL APIs under `jolt.crypto`.** Ported byte and codec
+- **Buddy-compatible OpenSSL APIs under `jolt.crypto`** (#24). Ported byte and codec
   helpers; MD5, SHA-1, SHA-256/384/512, SHA-3, BLAKE2b-512 and RIPEMD-160
   hashes; HMAC and AES-Poly1305; HKDF, KDF1/KDF2, counter/feedback/double-pipeline KDF and
   PBKDF2; AES ECB/CBC/CTR/OFB/GCM, original ChaCha, and authenticated
@@ -26,6 +28,26 @@ matching `:git/sha`.
 - Tiger, Whirlpool, RIPEMD-128/256/320, BLAKE3, Skein, BLAKE2b-128/256,
   Twofish, Serpent, and their dependent variants are explicitly deferred rather
   than approximated with incompatible implementations.
+- HKDF, KDF1, KDF2, CMKDF, FMKDF and DPIMKDF have `+sha384` engine aliases.
+  Buddy's misspelled `+sha386` aliases are kept and still throw.
+
+### Changed
+
+- **OpenSSL 3 is required.** `jolt.crypto` now binds functions that only
+  OpenSSL 3 has, so the OpenSSL 1.1 library names are gone from
+  `:jolt/native`. A host with only 1.1 reports OpenSSL as missing instead of
+  failing when the namespace loads.
+- Hash and HMAC engines feed OpenSSL as the data arrives, so hashing a file
+  or stream runs in constant memory.
+
+### Fixed
+
+- **`MessageDigest/getInstance` ignores the case of the algorithm name**
+  (#23), so `"sha-256"` and `"md5"` work the way they do on the JVM.
+- `:ripemd160` throws an unsupported-algorithm `ex-info` on OpenSSL
+  3.0.0–3.0.6 (Ubuntu 22.04 ships 3.0.2), where only the legacy provider has
+  it. It used to fail deep inside OpenSSL. It needs 3.0.7 or later, and
+  `jolt.crypto.internal.openssl/digest-available?` says whether a host has it.
 
 ## [0.3.0] - 2026-11-26
 
@@ -176,7 +198,8 @@ The same code as 0.1.0, tagged on the merge of #16.
 - First release: AES/CBC, HMAC, SHA digests, MD5 and `SecureRandom` over
   OpenSSL, through the `javax.crypto` / `java.security` classes.
 
-[Unreleased]: https://github.com/jolt-lang/crypto/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/jolt-lang/crypto/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/jolt-lang/crypto/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jolt-lang/crypto/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/jolt-lang/crypto/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/jolt-lang/crypto/compare/v0.1.0...v0.2.0
