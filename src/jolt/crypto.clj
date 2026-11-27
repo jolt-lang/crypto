@@ -224,8 +224,9 @@
     (ba-window data (first more) (second more))
     (snapshot-ba data)))
 
-(defn- concat-bas [bas]
+(defn- concat-bas
   "Join byte arrays with bulk copies."
+  [bas]
   (let [total (reduce + 0 (map alength bas))
         out (byte-array total)]
     (loop [off 0 remaining bas]

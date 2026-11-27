@@ -421,3 +421,22 @@ itself; on Windows that takes jolt 0.8.16 or later, which added `crypt32`:
 ```
 jolt -M:test
 ```
+
+## Code metrics
+
+CI runs [jolt-metrics](https://github.com/jlt-commons/jolt-metrics) on every
+push and pull request. The report goes in the job summary, and on a pull request
+it opens with what changed since `main`. The build fails on a new critical
+finding (a function past a hard complexity, length, nesting or parameter limit,
+or a file over 1000 source lines), on unused code, or on a lint warning.
+
+```
+jolt run metrics        # print the report
+jolt run metrics-gate   # run the same check CI runs
+```
+
+`ci/metrics-allow.edn` lists what the check lets through, each entry with a
+`:why`. Five functions and `src/jolt/crypto.clj` itself were already critical
+when the check was added. Their entries record the values they had at v0.4.1,
+so each one fails if it gets worse, and the check asks for the entry to go once
+it's refactored.
