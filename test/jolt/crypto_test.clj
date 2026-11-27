@@ -4,6 +4,8 @@
   (:require [jolt.crypto]
             [jolt.crypto.bytes-test]
             [jolt.crypto.codecs-test]
+            [jolt.crypto.padding-test]
+            [jolt.crypto.nonce-test]
             [jolt.crypto.x509-test :as x509-test]
             [clojure.edn :as edn]
             [clojure.string :as str]
@@ -713,7 +715,9 @@
            (int? (.nextInt (java.security.SecureRandom/getInstanceStrong) 100))))
 
   (let [{:keys [fail error]} (t/run-tests 'jolt.crypto.bytes-test
-                                          'jolt.crypto.codecs-test)]
+                                          'jolt.crypto.codecs-test
+                                          'jolt.crypto.padding-test
+                                          'jolt.crypto.nonce-test)]
     (swap! failures + fail error))
 
   (if (zero? @failures)
