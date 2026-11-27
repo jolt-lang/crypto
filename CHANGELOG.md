@@ -9,15 +9,30 @@ matching `:git/sha`.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-27
+
 ### Added
 
 - CI runs jolt-metrics and fails on a new critical finding, unused code or a
-  lint warning (`ci/metrics-gate.clj`, adapted from jolt's). The findings that
-  were already there at 0.4.1 are allowlisted at their current values: six
-  critical ones, among them `install!` and the 1432-line `jolt/crypto.clj`, plus
-  an unused public function and four `:refer :all` lints in the ported tests.
-  `jolt run metrics` prints the report and
-  `jolt run metrics-gate` runs the check locally.
+  lint warning (`ci/metrics-gate.clj`, adapted from jolt's). What it lets
+  through is listed in `ci/metrics-allow.edn`: `jolt/crypto.clj`'s hotspot
+  risk, which follows churn rather than the code, an unused public function and
+  four `:refer :all` lints in the ported tests. `jolt run metrics` prints the
+  report and `jolt run metrics-gate` runs the check locally.
+
+### Changed
+
+- Refactored the code that was critical when the metrics check was added, with
+  no change in behaviour. `jolt.crypto` went from 1432 source lines to 923: its
+  libcrypto bindings, shared helpers, X.509 certificate parsing and shims, and
+  the pbeWithMD5AndDES PKCS#8 decoder moved to namespaces under
+  `jolt.crypto.internal`, and `install!` is a short list of per-class
+  installers. `cipher-context`, `x509/certificate`, `transcode-to-concat` and
+  the GCM engine's `process-gcm!` were split into smaller functions.
+- The `c-*` libcrypto bindings that were public vars of `jolt.crypto` now live
+  in `jolt.crypto.internal.libcrypto`. They were never documented API, but code
+  that redefined them (in a test's `with-redefs`, say) has to name the new
+  namespace.
 
 ### Fixed
 
@@ -227,7 +242,8 @@ The same code as 0.1.0, tagged on the merge of #16.
 - First release: AES/CBC, HMAC, SHA digests, MD5 and `SecureRandom` over
   OpenSSL, through the `javax.crypto` / `java.security` classes.
 
-[Unreleased]: https://github.com/jolt-lang/crypto/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/jolt-lang/crypto/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/jolt-lang/crypto/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/jolt-lang/crypto/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/jolt-lang/crypto/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jolt-lang/crypto/compare/v0.2.1...v0.3.0

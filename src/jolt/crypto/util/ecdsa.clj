@@ -88,51 +88,70 @@
                                 (+ s-tag-offset 2 (- l k)) k)))
           output)))))
 
+(defn- check-output-length [output-length]
+  (when-not (and (integer? output-length)
+                 (pos? output-length)
+                 (even? output-length))
+    (invalid)))
+
+(defn- sequence-header
+  "[offset length] of a DER SEQUENCE's content: its first INTEGER's offset and
+  the length the header declares, in short form or the one-byte long form."
+  [data total]
+  (when (or (< total 8) (not= 0x30 (unsigned data 0)))
+    (invalid))
+  (let [first-length (unsigned data 1)]
+    (cond
+      (= 0x81 first-length)
+      (let [sequence-length (unsigned data 2)]
+        (when (< sequence-length 128)
+          (invalid))
+        [3 sequence-length])
+
+      (or (pos? (bit-and first-length 0x80)) (zero? first-length))
+      (invalid)
+
+      :else [2 first-length])))
+
+(defn- integer-field
+  "[start length] of the canonical DER INTEGER whose tag is at `tag`, which
+  must end by `total`."
+  [data tag total]
+  (when (or (> (+ tag 2) total)
+            (not= 0x02 (unsigned data tag)))
+    (invalid))
+  (let [length (unsigned data (inc tag))
+        start (+ tag 2)]
+    (when (or (zero? length) (> (+ start length) total))
+      (invalid))
+    (check-integer data start length)
+    [start length]))
+
+(defn- copy-right-aligned!
+  "Copy the significant bytes of the integer at [start, start+length) into
+  output so that they end at `end`."
+  [data [start length] output end]
+  (let [significant (significant-length data start length)]
+    (System/arraycopy data (- (+ start length) significant)
+                      output (- end significant) significant)))
+
 (defn transcode-to-concat
   "Transcode an ASN.1 DER ECDSA signature to fixed-width JWS R+S form."
   [data output-length]
   (let [data (byte-array data)
-        total (alength data)]
-    (when (or (< total 8)
-              (not= 0x30 (unsigned data 0))
-              (not (and (integer? output-length)
-                        (pos? output-length)
-                        (even? output-length))))
-      (invalid))
-    (let [first-length (unsigned data 1)
-          long-form (= 0x81 first-length)
-          offset (cond
-                   (pos? (bit-and first-length 0x80))
-                   (if long-form 3 (invalid))
-                   (zero? first-length) (invalid)
-                   :else 2)
-          sequence-length (if long-form
-                            (if (>= total 3) (unsigned data 2) (invalid))
-                            first-length)]
-      (when (or (and long-form (< sequence-length 128))
-                (not= sequence-length (- total offset))
-                (< total (+ offset 4))
-                (not= 0x02 (unsigned data offset)))
-        (invalid))
-      (let [r-length (unsigned data (inc offset))
-            r-start (+ offset 2)
-            s-tag (+ r-start r-length)]
-        (when (or (zero? r-length)
-                  (> (+ s-tag 2) total)
-                  (not= 0x02 (unsigned data s-tag)))
-          (invalid))
-        (let [s-length (unsigned data (inc s-tag))
-              s-start (+ s-tag 2)]
-          (when (or (zero? s-length)
-                    (not= sequence-length (+ 2 r-length 2 s-length))
-                    (not= total (+ s-start s-length)))
+        total (alength data)
+        _ (check-output-length output-length)
+        [offset sequence-length] (sequence-header data total)
+        _ (when (not= sequence-length (- total offset))
             (invalid))
-          (check-integer data r-start r-length)
-          (check-integer data s-start s-length)
-          (let [i (significant-length data r-start r-length)
-                j (significant-length data s-start s-length)
-                raw-length (max i j (quot output-length 2))
-                output (byte-array (* 2 raw-length))]
-            (System/arraycopy data (- (+ r-start r-length) i) output (- raw-length i) i)
-            (System/arraycopy data (- (+ s-start s-length) j) output (- (* 2 raw-length) j) j)
-            output))))))
+        r (integer-field data offset total)
+        s (integer-field data (apply + r) total)
+        _ (when (not= total (apply + s))
+            (invalid))
+        raw-length (max (significant-length data (first r) (second r))
+                        (significant-length data (first s) (second s))
+                        (quot output-length 2))
+        output (byte-array (* 2 raw-length))]
+    (copy-right-aligned! data r output raw-length)
+    (copy-right-aligned! data s output (* 2 raw-length))
+    output))
