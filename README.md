@@ -6,11 +6,11 @@ OpenSSL (`libcrypto`) through `jolt.ffi`, and exposed as the slice of the
 
 | Class | What you get |
 |-------|--------------|
-| `javax.crypto.Cipher` | `AES/CBC/PKCS5Padding` (128/192/256 — key length picks the variant) |
+| `javax.crypto.Cipher` | `AES/CBC/PKCS5Padding` and one-shot `AES/GCM/NoPadding` (128/192/256-bit AES keys, GCM with an explicit IV, a 128-bit tag and optional AAD) |
 | `javax.crypto.Mac` | `HmacSHA512`, `HmacSHA384`, `HmacSHA256`, `HmacSHA1` |
 | `java.security.MessageDigest` | `SHA-512`, `SHA-384`, `SHA-256`, `SHA-224`, `SHA-1`, `MD5` |
 | `java.security.SecureRandom` | `RAND_bytes`-backed `nextBytes` / `generateSeed` / `nextInt` / `nextLong` / `nextDouble` / `nextFloat` / `nextBoolean` |
-| `javax.crypto.spec.SecretKeySpec` / `IvParameterSpec` | key + IV holders |
+| `javax.crypto.spec.SecretKeySpec` / `IvParameterSpec` / `GCMParameterSpec` | key, IV and GCM parameter holders |
 | `java.security.KeyPairGenerator` | EC keygen over P-256 / P-384 / P-521 / secp256k1, RSA keygen (512–16384 bits, default 2048, exponent 65537), and Ed25519 (`Ed25519` / `EdDSA`) |
 | `java.security.Signature` | `SHA1`/`SHA224`/`SHA256`/`SHA384`/`SHA512withECDSA`, `…withRSA`, and `Ed25519` / `EdDSA` |
 | `java.security.KeyFactory` | EC, RSA and Ed25519 keys from encoded DER |

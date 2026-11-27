@@ -5,6 +5,7 @@
             [jolt.crypto.bytes :as crypto-bytes]
             [jolt.crypto.crypto :as buddy-crypto]
             [jolt.crypto.bytes-test]
+            [jolt.jca-gcm-test]
             [jolt.crypto.codecs-test]
             [jolt.crypto.padding-test]
             [jolt.crypto.nonce-test]
@@ -760,6 +761,7 @@
            (int? (.nextInt (java.security.SecureRandom/getInstanceStrong) 100))))
 
   (let [{:keys [fail error]} (t/run-tests 'jolt.crypto.bytes-test
+                                          'jolt.jca-gcm-test
                                           'jolt.crypto.codecs-test
                                           'jolt.crypto.padding-test
                                           'jolt.crypto.nonce-test
