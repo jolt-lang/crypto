@@ -21,7 +21,8 @@
             [jolt.crypto.bytes :as bytes]
             [jolt.crypto.codecs :as codecs]
             [jolt.crypto.hash :as hash]
-            [jolt.crypto.internal.openssl :as openssl]))
+            [jolt.crypto.internal.openssl :as openssl]
+            [jolt.ffi :as ffi]))
 
 (def ^:private empty-vectors
   [[:md5 hash/md5
@@ -83,12 +84,15 @@
 (defn- hex [data]
   (codecs/bytes->hex data))
 
-(defn- exception-algorithm [f]
+(defn- exception-data [f]
   (try
     (f)
     nil
     (catch Exception e
-      (:algorithm (ex-data e)))))
+      (ex-data e))))
+
+(defn- exception-algorithm [f]
+  (:algorithm (exception-data f)))
 
 (deftest supported-empty-digest-vectors
   (doseq [[algorithm named-digest expected] empty-vectors]
@@ -158,6 +162,70 @@
     (hash/update! engine input)
     (aset-byte input 0 120)
     (is (= (hex (hash/sha256 "abc")) (hex (hash/end! engine))))))
+
+(deftest offset-only-update-hashes-exact-suffix
+  (let [engine (hash/resolve-digest-engine :sha256)]
+    (hash/update! engine (codecs/str->bytes "xxabc") 2)
+    (is (= (hex (hash/sha256 "abc")) (hex (hash/end! engine)))))
+  (let [engine (hash/resolve-digest-engine :sha256)]
+    (hash/update! engine (codecs/str->bytes "abc") 3)
+    (is (= (hex (hash/sha256 "")) (hex (hash/end! engine))))))
+
+(deftest invalid-update-windows-throw
+  (doseq [[offset length] [[-1 0] [0 -1] [4 0] [1 3] [0 4]]]
+    (let [engine (hash/resolve-digest-engine :sha256)
+          input (codecs/str->bytes "abc")]
+      (is (= {:offset offset :length length :input-length 3}
+             (select-keys (exception-data #(hash/update! engine input offset length))
+                          [:offset :length :input-length])))))
+  (let [engine (hash/resolve-digest-engine :sha256)
+        input (codecs/str->bytes "abc")]
+    (is (= {:offset 4 :length -1 :input-length 3}
+           (select-keys (exception-data #(hash/update! engine input 4))
+                        [:offset :length :input-length])))))
+
+(deftest native-pointer-construction-frees-partial-allocations
+  (testing "a later allocation failure frees earlier input pointers"
+    (let [allocations (atom 0)
+          freed (atom [])]
+      (with-redefs [ffi/alloc (fn [_]
+                                (let [ptr (swap! allocations inc)]
+                                  (if (= ptr 2)
+                                    (throw (ex-info "injected allocation failure" {:injected :allocation}))
+                                    ptr)))
+                    ffi/write-array (fn [_ _] nil)
+                    ffi/free (fn [ptr] (swap! freed conj ptr))]
+        (is (= :allocation
+               (:injected (exception-data
+                           #(#'openssl/with-byte-ptrs [(byte-array [1]) (byte-array [2])]
+                                                      (fn [_ _] (byte-array 0)))))))
+        (is (= [1] @freed)))))
+  (testing "a later write failure frees every input pointer"
+    (let [allocations (atom 0)
+          freed (atom [])]
+      (with-redefs [ffi/alloc (fn [_] (swap! allocations inc))
+                    ffi/write-array (fn [ptr _]
+                                      (when (= ptr 2)
+                                        (throw (ex-info "injected write failure" {:injected :write}))))
+                    ffi/free (fn [ptr] (swap! freed conj ptr))]
+        (is (= :write
+               (:injected (exception-data
+                           #(#'openssl/with-byte-ptrs [(byte-array [1]) (byte-array [2])]
+                                                      (fn [_ _] (byte-array 0)))))))
+        (is (= [1 2] @freed)))))
+  (testing "output-length allocation failure frees output and input pointers"
+    (let [allocations (atom 0)
+          freed (atom [])]
+      (with-redefs [ffi/alloc (fn [_]
+                                (let [ptr (swap! allocations inc)]
+                                  (if (= ptr 3)
+                                    (throw (ex-info "injected allocation failure" {:injected :allocation}))
+                                    ptr)))
+                    ffi/write-array (fn [_ _] nil)
+                    ffi/free (fn [ptr] (swap! freed conj ptr))]
+        (is (= :allocation
+               (:injected (exception-data #(openssl/digest-bytes :sha256 (byte-array [42]))))))
+        (is (= #{1 2} (set @freed)))))))
 
 (deftest engine-resolution-accepts-engines-and-factories
   (let [engine (hash/resolve-digest-engine :sha256)]

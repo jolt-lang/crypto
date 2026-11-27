@@ -48,15 +48,15 @@
     (byte-array value)))
 
 (defn- with-byte-ptrs [byte-arrays f]
-  (let [ptrs (mapv (fn [data]
-                     (let [ptr (ffi/alloc (max 1 (alength data)))]
-                       (ffi/write-array ptr data)
-                       ptr))
-                   byte-arrays)]
+  (let [ptrs (atom [])]
     (try
-      (apply f ptrs)
+      (doseq [data byte-arrays]
+        (let [ptr (ffi/alloc (max 1 (alength data)))]
+          (swap! ptrs conj ptr)
+          (ffi/write-array ptr data)))
+      (apply f @ptrs)
       (finally
-        (doseq [ptr ptrs]
+        (doseq [ptr @ptrs]
           (ffi/free ptr))))))
 
 (defn digest-bytes [algorithm data]
@@ -65,20 +65,22 @@
         data (as-bytes data)]
     (with-byte-ptrs [data]
       (fn [data-ptr]
-        (let [output (ffi/alloc 64)
-              output-length (ffi/alloc 4)]
+        (let [output (ffi/alloc 64)]
           (try
-            (when-not (= 1 (c-digest data-ptr (alength data) output output-length md ffi/null))
-              (throw (ex-info (str "OpenSSL digest failed: " algorithm)
-                              {:algorithm algorithm})))
-            (let [actual-length (ffi/read output-length :int)]
-              (when-not (= length actual-length)
-                (throw (ex-info (str "OpenSSL returned an unexpected digest length: " algorithm)
-                                {:algorithm algorithm :expected length :actual actual-length})))
-              (ffi/read-array output actual-length))
+            (let [output-length (ffi/alloc 4)]
+              (try
+                (when-not (= 1 (c-digest data-ptr (alength data) output output-length md ffi/null))
+                  (throw (ex-info (str "OpenSSL digest failed: " algorithm)
+                                  {:algorithm algorithm})))
+                (let [actual-length (ffi/read output-length :int)]
+                  (when-not (= length actual-length)
+                    (throw (ex-info (str "OpenSSL returned an unexpected digest length: " algorithm)
+                                    {:algorithm algorithm :expected length :actual actual-length})))
+                  (ffi/read-array output actual-length))
+                (finally
+                  (ffi/free output-length))))
             (finally
-              (ffi/free output)
-              (ffi/free output-length))))))))
+              (ffi/free output))))))))
 
 (defn hmac-bytes [algorithm key data]
   (let [md (digest-md algorithm)

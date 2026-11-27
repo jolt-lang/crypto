@@ -40,9 +40,16 @@
     (clojure.core/reset! chunks [])
     nil)
   (-update [_ input offset length]
-    (let [window (bytes/slice input offset (+ offset length))]
-      (swap! chunks conj window)
-      nil))
+    (let [input-length (count input)]
+      (when (or (neg? offset)
+                (neg? length)
+                (> offset input-length)
+                (> length (- input-length offset)))
+        (throw (ex-info "Invalid digest update window"
+                        {:offset offset :length length :input-length input-length})))
+      (let [window (bytes/slice input offset (+ offset length))]
+        (swap! chunks conj window)
+        nil)))
   (-end [this]
     (try
       (openssl/digest-bytes algorithm (apply bytes/concat @chunks))
@@ -72,7 +79,7 @@
   ([engine input]
    (-update engine input 0 (count input)))
   ([engine input offset]
-   (-update engine input offset (count input)))
+   (-update engine input offset (- (count input) offset)))
   ([engine input offset length]
    (-update engine input offset length)))
 
