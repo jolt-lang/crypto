@@ -9,6 +9,8 @@ matching `:git/sha`.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-27
+
 ### Added
 
 - CI runs jolt-metrics and fails on a new critical finding, unused code or a
@@ -240,7 +242,8 @@ The same code as 0.1.0, tagged on the merge of #16.
 - First release: AES/CBC, HMAC, SHA digests, MD5 and `SecureRandom` over
   OpenSSL, through the `javax.crypto` / `java.security` classes.
 
-[Unreleased]: https://github.com/jolt-lang/crypto/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/jolt-lang/crypto/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/jolt-lang/crypto/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/jolt-lang/crypto/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/jolt-lang/crypto/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jolt-lang/crypto/compare/v0.2.1...v0.3.0
