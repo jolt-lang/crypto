@@ -34,30 +34,37 @@
   (-update [_ input offset length] "Update bytes in a current instance.")
   (-end [_] "Return the computed mac and reset the engine."))
 
-(defrecord OpenSSLDigestEngine [algorithm chunks]
+(defn- check-window [input offset length]
+  (let [input-length (count input)]
+    (when (or (neg? offset)
+              (neg? length)
+              (> offset input-length)
+              (> length (- input-length offset)))
+      (throw (ex-info "Invalid digest update window"
+                      {:offset offset :length length :input-length input-length})))))
+
+;; ctx holds a native incremental digest context once the first update arrives,
+;; so a stream is hashed in constant memory. end! and reset! free it; an engine
+;; abandoned mid-stream keeps it until the process exits (no finalizer).
+(defrecord OpenSSLDigestEngine [algorithm ctx]
   IEngine
   (-reset [_]
-    (clojure.core/reset! chunks [])
+    (when-let [c @ctx]
+      (clojure.core/reset! ctx nil)
+      (openssl/free-digest-context! c))
     nil)
   (-update [_ input offset length]
-    (let [input-length (count input)]
-      (when (or (neg? offset)
-                (neg? length)
-                (> offset input-length)
-                (> length (- input-length offset)))
-        (throw (ex-info "Invalid digest update window"
-                        {:offset offset :length length :input-length input-length})))
-      (let [window (bytes/slice input offset (+ offset length))]
-        (swap! chunks conj window)
-        nil)))
-  (-end [this]
-    (try
-      (openssl/digest-bytes algorithm (apply bytes/concat @chunks))
-      (finally
-        (-reset this)))))
+    (check-window input offset length)
+    (let [c (or @ctx (clojure.core/reset! ctx (openssl/digest-context algorithm)))]
+      (openssl/digest-update! c algorithm (bytes/slice input offset (+ offset length)))
+      nil))
+  (-end [_]
+    (let [c (or @ctx (openssl/digest-context algorithm))]
+      (clojure.core/reset! ctx nil)
+      (openssl/digest-finish! c algorithm))))
 
 (defn- make-engine [algorithm]
-  (->OpenSSLDigestEngine algorithm (atom [])))
+  (->OpenSSLDigestEngine algorithm (atom nil)))
 
 (def ^:no-doc +digest-engines+
   {:sha256 #(make-engine :sha256)
@@ -106,11 +113,15 @@
 (defn- hash-stream-data [input engine]
   (-reset engine)
   (let [buffer (byte-array 5120)]
-    (loop []
-      (let [readed (.read input buffer 0 5120)]
-        (when-not (= readed -1)
-          (-update engine buffer 0 readed)
-          (recur))))
+    (try
+      (loop []
+        (let [readed (.read input buffer 0 5120)]
+          (when-not (= readed -1)
+            (-update engine buffer 0 readed)
+            (recur))))
+      (catch Throwable e
+        (-reset engine)
+        (throw e)))
     (-end engine)))
 
 (extend-protocol IDigest

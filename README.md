@@ -126,7 +126,10 @@ available alongside these namespaces.
 Digests accept byte arrays, strings, streams, files, URLs, and URIs. Supported
 algorithms are `:md5`, `:sha1`, `:sha256`, `:sha384`, `:sha512`, `:sha3-256`,
 `:sha3-384`, `:sha3-512`, `:blake2b-512`, and `:ripemd160`. Named functions are
-available for each. Generic `blake2b` accepts only a 64-byte output length;
+available for each. `:ripemd160` needs OpenSSL 3.0.7 or later: earlier 3.0
+releases (Ubuntu 22.04 ships 3.0.2) keep it in the legacy provider, which this
+library does not load, so there it throws an unsupported-algorithm `ex-info`.
+`(jolt.crypto.internal.openssl/digest-available? :ripemd160)` reports which. Generic `blake2b` accepts only a 64-byte output length;
 BLAKE2b output is never truncated to imitate another algorithm.
 
 ### MAC and key derivation
@@ -158,9 +161,10 @@ KDF constructions are `:hkdf`, `:kdf1`, `:kdf2`, `:cmkdf` (counter mode),
 Their generic forms accept the supported digest keywords; PBKDF2 defaults to
 `kdf/+pbkdf2-iterations+` (1000) when `:iterations` is omitted. `get-bytes`
 returns a byte array and `get-buffer` returns a `ByteBuffer` over the derived
-bytes. HKDF, KDF1, KDF2, CMKDF, FMKDF, and DPIMKDF have `+sha256`, `+sha512`,
-and `+blake2b-512` aliases; PBKDF2 has `+sha256`, `+sha384`, and `+sha512`
-aliases. The generic form is the complete digest interface.
+bytes. HKDF, KDF1, KDF2, CMKDF, FMKDF, and DPIMKDF have `+sha256`, `+sha384`,
+`+sha512`, and `+blake2b-512` aliases; PBKDF2 has `+sha256`, `+sha384`, and
+`+sha512` aliases. Buddy's misspelled `+sha386` aliases are kept and throw, as
+they always did, naming `:sha386`. The generic form is the complete digest interface.
 
 ### Authenticated encryption and stateful ciphers
 
@@ -384,7 +388,7 @@ its CA's, so a leaf can outlive the CA that signed it.
 
 ## OpenSSL
 
-The library needs OpenSSL 3 at runtime. The compatibility layer targets
+The library needs OpenSSL 3 at runtime; OpenSSL 1.1 is no longer supported. The compatibility layer targets
 OpenSSL 3's default provider and does not require or enable the legacy provider.
 The native libraries are looked for in:
 
@@ -392,7 +396,7 @@ The native libraries are looked for in:
   MacPorts (`/opt/local/lib`), then `libcrypto.3.dylib` / `libssl.3.dylib` on the
   dynamic loader's path. Never `/usr/lib/libcrypto.dylib`: that is Apple's stub,
   and opening it aborts the process.
-- **Linux:** `libcrypto.so.3`, `libcrypto.so.1.1`, `libcrypto.so` (and the `libssl` equivalents).
+- **Linux:** `libcrypto.so.3`, `libcrypto.so` (and the `libssl` equivalents).
 - **Windows:** `libcrypto-3-x64.dll` and the other names OpenSSL's builds ship, beside
   the executable or on `PATH`.
 

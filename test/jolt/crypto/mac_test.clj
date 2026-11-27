@@ -188,3 +188,11 @@
       (is (some? (exception-data
                   #(openssl/poly1305-aes-bytes poly-key poly-iv (codecs/str->bytes "text")))))
       (is (= [1 1 1] [@cipher-frees @pkey-frees @md-frees])))))
+
+(deftest stream-hmac-matches-one-shot
+  (let [data (byte-array (map unchecked-byte (range (* 3 1024 1024))))]
+    (doseq [alg [:hmac+sha256 :hmac+sha512]]
+      (testing (str alg)
+        (is (= (codecs/bytes->hex (mac/hash data {:key secret :alg alg}))
+               (codecs/bytes->hex (mac/hash (java.io.ByteArrayInputStream. data)
+                                            {:key secret :alg alg}))))))))

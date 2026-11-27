@@ -580,3 +580,15 @@
             (is (= 2 (count @freed)))
             (is (some #{old-context} @freed))
             (is (nil? @holder))))))))
+
+(deftest ecb-accepts-nil-iv
+  (let [key (byte-array (range 16))
+        block (byte-array (range 16))
+        run (fn [params]
+              (let [engine (crypto/block-cipher :aes :ecb)
+                    out (byte-array 16)]
+                (crypto/init! engine params)
+                (crypto/process-block! engine block 0 out 0)
+                (hex out)))]
+    (is (= (run {:key key :op :encrypt})
+           (run {:key key :iv nil :op :encrypt})))))

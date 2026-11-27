@@ -418,7 +418,9 @@
                          0
                          (bit-and first-length 0x7f))
           content-offset (+ offset 2 length-bytes)]
-      (when (or (> length-bytes 4) (> content-offset size)) (malformed-pkcs8))
+      ;; 0x80 is BER's indefinite length, which DER forbids.
+      (when (or (= first-length 0x80) (> length-bytes 4) (> content-offset size))
+        (malformed-pkcs8))
       (let [content-length (if (zero? length-bytes)
                              first-length
                              (loop [index 0 length 0]
@@ -428,6 +430,11 @@
                                         (+ (* 256 length)
                                            (bit-and (aget der (+ offset 2 index)) 0xff))))))
             end (+ content-offset content-length)]
+        ;; DER lengths are minimal: long form only from 128, no leading zero byte.
+        (when (and (pos? length-bytes)
+                   (or (< content-length 128)
+                       (zero? (bit-and (aget der (+ offset 2)) 0xff))))
+          (malformed-pkcs8))
         (when (> end size) (malformed-pkcs8))
         {:tag tag :start content-offset :end end :next end}))))
 
@@ -436,6 +443,8 @@
     (when (or (not= tag (:tag node)) (> (:next node) (:end parent)))
       (malformed-pkcs8))
     node))
+
+(def ^:private max-pbkdf1-iterations 10000000)
 
 (def ^:private pbe-md5-des-oid
   [0x2a 0x86 0x48 0x86 0xf7 0x0d 0x01 0x05 0x03])
@@ -468,13 +477,16 @@
             (malformed-pkcs8))
         algorithm (der-child der outer (:start outer) 0x30)
         oid (der-child der algorithm (:start algorithm) 0x06)
-        _ (when-not (der-content= der oid pbe-md5-des-oid) (malformed-pkcs8))
+        _ (when-not (der-content= der oid pbe-md5-des-oid)
+            (throw (ex-info "Not a pbeWithMD5AndDES key" {::not-md5-des true})))
         params (der-child der algorithm (:next oid) 0x30)
         salt (der-child der params (:start params) 0x04)
         _ (when-not (= 8 (- (:end salt) (:start salt))) (malformed-pkcs8))
         iterations-node (der-child der params (:next salt) 0x02)
         _ (when-not (= (:next iterations-node) (:end params)) (malformed-pkcs8))
         iterations (der-positive-int der iterations-node)
+        ;; One MD5 call per iteration: a hostile file must not hang the caller.
+        _ (when (> iterations max-pbkdf1-iterations) (malformed-pkcs8))
         _ (when-not (= (:next params) (:end algorithm)) (malformed-pkcs8))
         ciphertext (der-child der outer (:next algorithm) 0x04)
         ciphertext-length (- (:end ciphertext) (:start ciphertext))
@@ -557,7 +569,12 @@
                 (decode password))))))
       (catch clojure.lang.ExceptionInfo e
         (if (str/includes? text "-----BEGIN ENCRYPTED PRIVATE KEY-----")
-          (decode-pkcs8-md5-des text passphrase)
+          ;; Only legacy pbeWithMD5AndDES keys fall back; any other scheme keeps
+          ;; OpenSSL's own failure (a wrong passphrase, say).
+          (try
+            (decode-pkcs8-md5-des text passphrase)
+            (catch clojure.lang.ExceptionInfo fallback
+              (throw (if (::not-md5-des (ex-data fallback)) e fallback))))
           (throw e))))))
 
 (defn decode-pem-public-key

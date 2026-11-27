@@ -3,6 +3,8 @@
             [jolt.ffi :as ffi]))
 
 (ffi/defcfn c-get-digest "EVP_get_digestbyname" [:string] :pointer)
+(ffi/defcfn c-fetch-digest "EVP_MD_fetch" [:pointer :string :pointer] :pointer)
+(ffi/defcfn c-free-digest "EVP_MD_free" [:pointer] :void)
 (ffi/defcfn c-digest-size "EVP_MD_get_size" [:pointer] :int)
 (ffi/defcfn c-digest "EVP_Digest" [:pointer :size_t :pointer :pointer :pointer :pointer] :int)
 (ffi/defcfn c-hmac "HMAC" [:pointer :pointer :int :pointer :size_t :pointer :pointer] :pointer)
@@ -46,6 +48,14 @@
 (ffi/defcfn c-err-clear "ERR_clear_error" [] :void)
 (ffi/defcfn c-md-ctx-new "EVP_MD_CTX_new" [] :pointer)
 (ffi/defcfn c-md-ctx-free "EVP_MD_CTX_free" [:pointer] :void)
+(ffi/defcfn c-digest-init "EVP_DigestInit_ex" [:pointer :pointer :pointer] :int)
+(ffi/defcfn c-digest-update "EVP_DigestUpdate" [:pointer :pointer :size_t] :int)
+(ffi/defcfn c-digest-final "EVP_DigestFinal_ex" [:pointer :pointer :pointer] :int)
+(ffi/defcfn c-hmac-ctx-new "HMAC_CTX_new" [] :pointer)
+(ffi/defcfn c-hmac-ctx-free "HMAC_CTX_free" [:pointer] :void)
+(ffi/defcfn c-hmac-init "HMAC_Init_ex" [:pointer :pointer :int :pointer :pointer] :int)
+(ffi/defcfn c-hmac-update "HMAC_Update" [:pointer :pointer :size_t] :int)
+(ffi/defcfn c-hmac-final "HMAC_Final" [:pointer :pointer :pointer] :int)
 (ffi/defcfn c-poly1305-sign-init "EVP_DigestSignInit" [:pointer :pointer :pointer :pointer :pointer] :int)
 (ffi/defcfn c-poly1305-sign "EVP_DigestSign" [:pointer :pointer :pointer :pointer :size_t] :int)
 
@@ -70,9 +80,32 @@
   (throw (ex-info (str "Unsupported digest algorithm: " algorithm)
                   {:algorithm algorithm})))
 
+(def ^:private provided-digests (atom {}))
+
+(defn- provided?
+  "Whether a loaded provider implements digest-name. EVP_get_digestbyname
+  answers from a static table, so on OpenSSL 3.0.0-3.0.6 it hands back
+  RIPEMD160 although only the legacy provider, which this library never loads,
+  implements it there; using it then fails deep inside EVP_Digest or HMAC."
+  [digest-name]
+  (let [cached (get @provided-digests digest-name ::unknown)]
+    (if (= ::unknown cached)
+      (let [md (c-fetch-digest ffi/null digest-name ffi/null)
+            found (not (ffi/null? md))]
+        (if found (c-free-digest md) (c-err-clear))
+        (swap! provided-digests assoc digest-name found)
+        found)
+      cached)))
+
+(defn digest-available?
+  "Whether this host's OpenSSL computes algorithm. :ripemd160 needs OpenSSL
+  3.0.7 or later, which moved it back into the default provider."
+  [algorithm]
+  (boolean (some-> (get digest-names algorithm) provided?)))
+
 (defn- digest-md [algorithm]
   (let [digest-name (get digest-names algorithm)]
-    (when-not digest-name
+    (when-not (and digest-name (provided? digest-name))
       (unsupported-algorithm algorithm))
     (let [md (c-get-digest digest-name)]
       (when (ffi/null? md)
@@ -516,3 +549,82 @@
         (aset-byte r index (unchecked-byte (bit-and (aget r index) 252))))
       (let [pad (aes-128-ecb-block (bytes/slice key 16 32) iv)]
         (poly1305-bytes (bytes/concat r pad) data)))))
+
+;; Incremental digest and HMAC contexts, for engines that stream: each update
+;; goes straight into OpenSSL, so hashing a large file runs in constant memory.
+;; A context is native memory with no finalizer; finish-* and free-* release it.
+
+(defn- feed! [update-fn ctx data what algorithm]
+  (with-byte-ptrs [data]
+    (fn [data-ptr]
+      (when-not (= 1 (update-fn ctx data-ptr (alength data)))
+        (throw (ex-info (str "OpenSSL " what " update failed: " algorithm)
+                        {:algorithm algorithm}))))))
+
+(defn- finish! [final-fn ctx algorithm what]
+  (let [md (digest-md algorithm)
+        length (md-size algorithm md)
+        output (ffi/alloc 64)
+        output-length (ffi/alloc 4)]
+    (try
+      (when-not (= 1 (final-fn ctx output output-length))
+        (throw (ex-info (str "OpenSSL " what " failed: " algorithm) {:algorithm algorithm})))
+      (ffi/read-array output length)
+      (finally
+        (ffi/free output-length)
+        (ffi/free output)))))
+
+(defn digest-context
+  "A new incremental digest context for algorithm."
+  [algorithm]
+  (let [md (digest-md algorithm)
+        ctx (c-md-ctx-new)]
+    (when (ffi/null? ctx)
+      (throw (ex-info "OpenSSL could not allocate a digest context" {:algorithm algorithm})))
+    (when-not (= 1 (c-digest-init ctx md ffi/null))
+      (c-md-ctx-free ctx)
+      (throw (ex-info (str "OpenSSL digest failed: " algorithm) {:algorithm algorithm})))
+    ctx))
+
+(defn digest-update! [ctx algorithm data]
+  (feed! c-digest-update ctx (as-bytes data) "digest" algorithm))
+
+(defn digest-finish!
+  "Finalize ctx, free it and return the digest."
+  [ctx algorithm]
+  (try
+    (finish! c-digest-final ctx algorithm "digest")
+    (finally
+      (c-md-ctx-free ctx))))
+
+(defn free-digest-context! [ctx]
+  (c-md-ctx-free ctx))
+
+(defn hmac-context
+  "A new incremental HMAC context for algorithm keyed with key."
+  [algorithm key]
+  (let [md (digest-md algorithm)
+        key (as-bytes key)
+        ctx (c-hmac-ctx-new)]
+    (when (ffi/null? ctx)
+      (throw (ex-info "OpenSSL could not allocate an HMAC context" {:algorithm algorithm})))
+    (with-byte-ptrs [key]
+      (fn [key-ptr]
+        (when-not (= 1 (c-hmac-init ctx key-ptr (alength key) md ffi/null))
+          (c-hmac-ctx-free ctx)
+          (throw (ex-info (str "OpenSSL HMAC failed: " algorithm) {:algorithm algorithm})))))
+    ctx))
+
+(defn hmac-update! [ctx algorithm data]
+  (feed! c-hmac-update ctx (as-bytes data) "HMAC" algorithm))
+
+(defn hmac-finish!
+  "Finalize ctx, free it and return the MAC."
+  [ctx algorithm]
+  (try
+    (finish! c-hmac-final ctx algorithm "HMAC")
+    (finally
+      (c-hmac-ctx-free ctx))))
+
+(defn free-hmac-context! [ctx]
+  (c-hmac-ctx-free ctx))

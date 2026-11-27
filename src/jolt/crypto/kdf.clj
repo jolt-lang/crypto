@@ -145,6 +145,10 @@
   [options]
   (engine (assoc options :alg :hkdf :digest :sha256)))
 
+(defmethod engine :hkdf+sha384
+  [options]
+  (engine (assoc options :alg :hkdf :digest :sha384)))
+
 (defmethod engine :hkdf+sha386
   [options]
   (engine (assoc options :alg :hkdf :digest :sha386)))
@@ -180,6 +184,10 @@
   [options]
   (engine (assoc options :alg :kdf1 :digest :sha256)))
 
+(defmethod engine :kdf1+sha384
+  [options]
+  (engine (assoc options :alg :kdf1 :digest :sha384)))
+
 (defmethod engine :kdf1+sha386
   [options]
   (engine (assoc options :alg :kdf1 :digest :sha386)))
@@ -199,6 +207,10 @@
 (defmethod engine :kdf2+sha256
   [options]
   (engine (assoc options :alg :kdf2 :digest :sha256)))
+
+(defmethod engine :kdf2+sha384
+  [options]
+  (engine (assoc options :alg :kdf2 :digest :sha384)))
 
 (defmethod engine :kdf2+sha386
   [options]
@@ -229,6 +241,10 @@
 (defmethod engine :cmkdf+sha256
   [options]
   (engine (assoc options :alg :cmkdf :digest :sha256)))
+
+(defmethod engine :cmkdf+sha384
+  [options]
+  (engine (assoc options :alg :cmkdf :digest :sha384)))
 
 (defmethod engine :cmkdf+sha386
   [options]
@@ -268,6 +284,10 @@
   [options]
   (engine (assoc options :alg :fmkdf :digest :sha256)))
 
+(defmethod engine :fmkdf+sha384
+  [options]
+  (engine (assoc options :alg :fmkdf :digest :sha384)))
+
 (defmethod engine :fmkdf+sha386
   [options]
   (engine (assoc options :alg :fmkdf :digest :sha386)))
@@ -306,6 +326,10 @@
 (defmethod engine :dpimkdf+sha256
   [options]
   (engine (assoc options :alg :dpimkdf :digest :sha256)))
+
+(defmethod engine :dpimkdf+sha384
+  [options]
+  (engine (assoc options :alg :dpimkdf :digest :sha384)))
 
 (defmethod engine :dpimkdf+sha386
   [options]

@@ -141,7 +141,8 @@
     (let [mismatched (assoc jwk :x (if (= "Ed25519" (:crv jwk))
                                      (:x ed448-jwk-key)
                                      (:x ed25519-jwk-key)))]
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Public key doesn't match private key"
+      ;; The other curve's x has the wrong length for crv, so it fails on that.
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"raw keys must be"
                             (keys/jwk->private-key mismatched))))
     (let [[public _] (load-pair jwk)
           other-public (keys/jwk->public-key (dissoc (if (= "Ed25519" (:crv jwk))

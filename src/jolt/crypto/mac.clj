@@ -73,22 +73,39 @@
   (clojure.core/reset! chunks [])
   nil)
 
-(defrecord OpenSSLHmacEngine [algorithm key chunks]
+;; ctx holds a native incremental HMAC context once the first update arrives,
+;; so a stream is MACed in constant memory. end!, reset! and init! free it.
+(defn- free-hmac! [ctx]
+  (when-let [c @ctx]
+    (clojure.core/reset! ctx nil)
+    (openssl/free-hmac-context! c))
+  nil)
+
+(defrecord OpenSSLHmacEngine [algorithm key ctx]
   IEngineInit
   (-init [_ options]
+    (free-hmac! ctx)
     (clojure.core/reset! key (bytes/copy (codecs/to-bytes (:key options))))
-    (reset-chunks chunks))
+    nil)
 
   IEngine
   (-reset [_]
-    (reset-chunks chunks))
+    (free-hmac! ctx))
   (-update [_ input offset length]
-    (update-chunks chunks input offset length))
-  (-end [this]
-    (try
-      (openssl/hmac-bytes algorithm @key (apply bytes/concat @chunks))
-      (finally
-        (-reset this)))))
+    (let [input-length (count input)]
+      (when (or (neg? offset)
+                (neg? length)
+                (> offset input-length)
+                (> length (- input-length offset)))
+        (throw (ex-info "Invalid MAC update window"
+                        {:offset offset :length length :input-length input-length}))))
+    (let [c (or @ctx (clojure.core/reset! ctx (openssl/hmac-context algorithm @key)))]
+      (openssl/hmac-update! c algorithm (bytes/slice input offset (+ offset length)))
+      nil))
+  (-end [_]
+    (let [c (or @ctx (openssl/hmac-context algorithm @key))]
+      (clojure.core/reset! ctx nil)
+      (openssl/hmac-finish! c algorithm))))
 
 (defrecord OpenSSLPoly1305Engine [cipher key iv chunks]
   IEngineInit
@@ -126,7 +143,7 @@
     algorithm))
 
 (defn- hmac-engine [digest]
-  (->OpenSSLHmacEngine (digest-algorithm digest) (atom nil) (atom [])))
+  (->OpenSSLHmacEngine (digest-algorithm digest) (atom nil) (atom nil)))
 
 (defn- poly1305-engine [cipher]
   (when-not (= :aes (:algorithm cipher))
@@ -185,11 +202,15 @@
 (defn- hash-stream-data [input engine]
   (-reset engine)
   (let [buffer (byte-array 5120)]
-    (loop []
-      (let [readed (.read input buffer 0 5120)]
-        (when-not (= readed -1)
-          (-update engine buffer 0 readed)
-          (recur))))
+    (try
+      (loop []
+        (let [readed (.read input buffer 0 5120)]
+          (when-not (= readed -1)
+            (-update engine buffer 0 readed)
+            (recur))))
+      (catch Throwable e
+        (-reset engine)
+        (throw e)))
     (-end engine)))
 
 (defn- verify-plain-data [input signature engine]

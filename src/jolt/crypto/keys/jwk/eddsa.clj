@@ -45,20 +45,22 @@
                     {:actual (count raw)}))))
 
 (defn bc-ed-private-key
-  "Construct a tagged EdDSA PrivateKey from raw 32/57-byte private key data."
-  [raw]
-  (crypto/ed-private-from-raw (curve-for-raw raw) raw))
+  "Construct a tagged EdDSA PrivateKey from raw private key data. With a curve
+  the length must match it; without one, 32 bytes is Ed25519 and 57 Ed448."
+  ([raw] (bc-ed-private-key (curve-for-raw raw) raw))
+  ([curve raw] (crypto/ed-private-from-raw curve raw)))
 
 (defn bc-ed-public-key
-  "Construct a tagged EdDSA PublicKey from raw 32/57-byte public key data."
-  [raw]
-  (crypto/ed-public-from-raw (curve-for-raw raw) raw))
+  "Construct a tagged EdDSA PublicKey from raw public key data. With a curve
+  the length must match it; without one, 32 bytes is Ed25519 and 57 Ed448."
+  ([raw] (bc-ed-public-key (curve-for-raw raw) raw))
+  ([curve raw] (crypto/ed-public-from-raw curve raw)))
 
 (defn- pubkey-25519 [jwk]
-  (bc-ed-public-key (codecs/b64->bytes (:x jwk) true)))
+  (bc-ed-public-key "Ed25519" (codecs/b64->bytes (:x jwk) true)))
 
 (defn- pubkey-448 [jwk]
-  (bc-ed-public-key (codecs/b64->bytes (:x jwk) true)))
+  (bc-ed-public-key "Ed448" (codecs/b64->bytes (:x jwk) true)))
 
 (defn- verify-public-key! [private public]
   (let [public-bytes (crypto/ed-public-bytes public)
@@ -70,7 +72,7 @@
 
 (defmethod okp/jwkokp->private-key "Ed25519"
   [jwk]
-  (let [private (bc-ed-private-key (codecs/b64->bytes (:d jwk) true))
+  (let [private (bc-ed-private-key "Ed25519" (codecs/b64->bytes (:d jwk) true))
         public (pubkey-25519 jwk)]
     (verify-public-key! private public)
     private))
@@ -81,7 +83,7 @@
 
 (defmethod okp/jwkokp->private-key "Ed448"
   [jwk]
-  (let [private (bc-ed-private-key (codecs/b64->bytes (:d jwk) true))
+  (let [private (bc-ed-private-key "Ed448" (codecs/b64->bytes (:d jwk) true))
         public (pubkey-448 jwk)]
     (verify-public-key! private public)
     private))

@@ -65,17 +65,15 @@
                           "/usr/local/opt/openssl@3/lib/libcrypto.3.dylib"
                           "/opt/local/lib/libcrypto.3.dylib"
                           "libcrypto.3.dylib"]
-                :linux   ["libcrypto.so.3" "libcrypto.so.1.1" "libcrypto.so"]
-                :windows ["libcrypto-3-x64.dll" "libcrypto-3.dll"
-                          "libcrypto-1_1-x64.dll" "libcrypto.dll"]}
+                :linux   ["libcrypto.so.3" "libcrypto.so"]
+                :windows ["libcrypto-3-x64.dll" "libcrypto-3.dll" "libcrypto.dll"]}
                {:name "ssl" :optional true
                 :darwin  ["/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib"
                           "/usr/local/opt/openssl@3/lib/libssl.3.dylib"
                           "/opt/local/lib/libssl.3.dylib"
                           "libssl.3.dylib"]
-                :linux   ["libssl.so.3" "libssl.so.1.1" "libssl.so"]
-                :windows ["libssl-3-x64.dll" "libssl-3.dll"
-                          "libssl-1_1-x64.dll" "libssl.dll"]}]
+                :linux   ["libssl.so.3" "libssl.so"]
+                :windows ["libssl-3-x64.dll" "libssl-3.dll" "libssl.dll"]}]
 
  :aliases {:test {:extra-paths ["test"]
                   :extra-deps {org.clojure/test.check {:mvn/version "1.1.1"}}

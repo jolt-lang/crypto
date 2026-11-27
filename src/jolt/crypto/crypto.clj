@@ -80,8 +80,7 @@
   (try
     (let [op (or (:op params) :encrypt)
           key (codecs/to-bytes (:key params))
-          iv (when (contains? params :iv)
-               (codecs/to-bytes (:iv params)))
+          iv (some-> (:iv params) codecs/to-bytes)
           ctx (openssl/cipher-context algorithm mode op key iv params)]
       (reset! holder ctx)
       (reset! operation op)

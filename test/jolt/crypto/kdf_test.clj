@@ -171,7 +171,9 @@
    [:pbkdf2 :ripemd160 "dd0d6bf8b59364b94ac1e09cddfb43d565c41e136b957951"]])
 
 (deftest generic-kdfs-support-every-digest-test
-  (doseq [[algorithm digest expected] generic-known-answers]
+  ;; RIPEMD-160 is in the default provider only from OpenSSL 3.0.7.
+  (doseq [[algorithm digest expected] generic-known-answers
+          :when (openssl/digest-available? digest)]
     (testing (str algorithm " with " digest)
       (let [options (cond-> {:key binary-key :salt binary-salt :alg algorithm :digest digest}
                       (= algorithm :hkdf) (assoc :info "context")
@@ -216,7 +218,7 @@
 
 (deftest named-engine-shorthands-test
   (doseq [algorithm [:hkdf :kdf1 :kdf2 :cmkdf :fmkdf :dpimkdf]
-          suffix ["sha256" "sha512" "blake2b-512"]]
+          suffix ["sha256" "sha384" "sha512" "blake2b-512"]]
     (testing (str algorithm "+" suffix)
       (let [digest (keyword suffix)
             generic {:key "key" :salt "salt" :info "info" :alg algorithm :digest digest}

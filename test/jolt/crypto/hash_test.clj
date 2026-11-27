@@ -94,8 +94,12 @@
 (defn- exception-algorithm [f]
   (:algorithm (exception-data f)))
 
+;; RIPEMD-160 is in the default provider only from OpenSSL 3.0.7.
+(defn- available-on-host? [algorithm]
+  (openssl/digest-available? algorithm))
+
 (deftest supported-empty-digest-vectors
-  (doseq [[algorithm named-digest expected] empty-vectors]
+  (doseq [[algorithm named-digest expected] (filter (comp available-on-host? first) empty-vectors)]
     (testing (str algorithm)
       (let [named-result (named-digest "")
             generic-result (hash/digest "" algorithm)
@@ -123,8 +127,14 @@
     (is (= :blake2b-512
            (exception-algorithm #(hash/blake2b "" length))))))
 
+(deftest unprovided-digest-is-reported-unsupported
+  (when-not (available-on-host? :ripemd160)
+    (is (= :ripemd160 (exception-algorithm #(hash/ripemd160 ""))))
+    (is (= :ripemd160 (exception-algorithm #(openssl/hmac-bytes :ripemd160 (byte-array 1) (byte-array 1))))))
+  (is (not (openssl/digest-available? :not-a-digest))))
+
 (deftest digest-lengths-and-hmac
-  (doseq [[algorithm length] digest-lengths]
+  (doseq [[algorithm length] (filter (comp available-on-host? key) digest-lengths)]
     (testing (str algorithm)
       (is (= length (openssl/digest-length algorithm)))
       (let [result (openssl/hmac-bytes algorithm
@@ -253,3 +263,18 @@
       (is (= algorithm (exception-algorithm #(openssl/digest-length algorithm))))
       (is (= algorithm (exception-algorithm #(openssl/digest-bytes algorithm (byte-array 0)))))
       (is (= algorithm (exception-algorithm #(openssl/hmac-bytes algorithm (byte-array 0) (byte-array 0))))))))
+
+(deftest stream-digest-matches-one-shot
+  (let [data (byte-array (map unchecked-byte (range (* 3 1024 1024))))]
+    (doseq [algorithm [:sha256 :sha512 :sha3-256 :blake2b-512]]
+      (testing (str algorithm)
+        (is (= (hex (hash/digest data algorithm))
+               (hex (hash/digest (java.io.ByteArrayInputStream. data) algorithm))))))))
+
+(deftest engine-reset-mid-stream-starts-over
+  (let [engine (hash/resolve-digest-engine :sha256)]
+    (hash/update! engine (codecs/str->bytes "discarded"))
+    (hash/reset! engine)
+    (hash/update! engine (codecs/str->bytes "abc"))
+    (is (= (hex (hash/sha256 "abc")) (hex (hash/end! engine))))
+    (is (= (hex (hash/sha256 "")) (hex (hash/end! engine))))))
