@@ -21,8 +21,7 @@
 
   By convenience, it also exposes additional functions
   for generate random iv/salts."
-  (:require [jolt.crypto :as crypto])
-  (:import java.security.SecureRandom))
+  (:require [jolt.crypto :as crypto]))
 
 (defn random-bytes
   "Generate a byte array of specified length with random
@@ -42,11 +41,13 @@
   generator. The minimum value is 8 bytes, and recommended
   minimum value is 32."
   ([numbytes]
-   (random-nonce numbytes (SecureRandom.)))
+   (random-nonce numbytes nil))
   ([numbytes sr]
    (let [buffer (java.nio.ByteBuffer/allocate numbytes)]
      (.putLong buffer (System/currentTimeMillis))
-     (.put buffer (random-bytes (.remaining buffer) sr))
+     (.put buffer (if sr
+                    (random-bytes (.remaining buffer) sr)
+                    (random-bytes (.remaining buffer))))
      (.array buffer))))
 
 (defmulti for-engine

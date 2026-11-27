@@ -21,24 +21,30 @@
   (:require [jolt.crypto :as crypto]
             [jolt.crypto.bytes :as bytes]))
 
+(defn- scan-indices [f init indices]
+  (reduce f init indices))
+
 (defn- pkcs7-add-padding [input offset]
-  (let [padsize (- (alength input) offset)]
-    (bytes/fill! input (unchecked-byte padsize) :start offset)
-    padsize))
+  (let [padsize (- (alength input) offset)
+        code (unchecked-byte padsize)]
+    (bytes/fill! input code :start offset)
+    code))
 
 (defn- pkcs7-pad-count [input]
   (let [length (alength input)]
     (if (zero? length)
       0
-      (let [padsize (bit-and (aget input (dec length)) 0xff)]
-        (if (or (zero? padsize) (> padsize length))
-          0
-          (loop [index 1]
-            (cond
-              (> index padsize) padsize
-              (= padsize (bit-and (aget input (- length index)) 0xff))
-              (recur (inc index))
-              :else 0)))))))
+      (let [padsize (bit-and (aget input (dec length)) 0xff)
+            offset (- length padsize)
+            valid (scan-indices
+                   (fn [valid index]
+                     (let [value (bit-and (aget input index) 0xff)
+                           in-padding? (>= index offset)
+                           matches? (or (not in-padding?) (= value padsize))]
+                       (bit-and valid (if matches? 1 0))))
+                   (if (and (pos? padsize) (<= padsize length)) 1 0)
+                   (range length))]
+        (if (pos? valid) padsize 0)))))
 
 (defn- tbc-add-padding [input offset]
   (let [padsize (- (alength input) offset)
@@ -50,19 +56,21 @@
 
 (defn- trailing-byte-count [input code]
   (let [length (alength input)]
-    (loop [size 0]
-      (if (and (< size length)
-               (= code (aget input (- length size 1))))
-        (recur (inc size))
-        size))))
+    (:count
+     (scan-indices
+      (fn [{:keys [count seen-other?]} index]
+        (let [matches? (= code (aget input index))]
+          {:count (if (and (not seen-other?) matches?) (inc count) count)
+           :seen-other? (or seen-other? (not matches?))}))
+      {:count 0 :seen-other? false}
+      (range (dec length) -1 -1)))))
 
 (defn- tbc-pad-count [input]
   (if (zero? (alength input))
     0
-    (let [code (aget input (dec (alength input)))]
-      (if (or (zero? code) (= -1 code))
-        (trailing-byte-count input code)
-        0))))
+    (let [code (aget input (dec (alength input)))
+          padsize (trailing-byte-count input code)]
+      (if (or (zero? code) (= -1 code)) padsize 0))))
 
 (defn- zerobyte-add-padding [input offset]
   (let [padsize (- (alength input) offset)]

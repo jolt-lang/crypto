@@ -63,7 +63,7 @@
   (testing "PKCS7 supports padding lengths through 255 bytes"
     (doseq [[size expected] [[128 -128] [255 -1]]]
       (let [data (byte-array size)]
-        (is (= size (padding/pad! data 0)))
+        (is (= expected (padding/pad! data 0)))
         (is (every? #(= expected %) data))
         (is (= size (padding/count data)))
         (is (zero? (count (padding/unpad data)))))))
@@ -112,6 +112,23 @@
       (is (= 2 (padding/count data alg)))
       (is (padding/padded? data alg))
       (is (zero? (count (padding/unpad data alg)))))))
+
+(deftest padding-inspection-scans-every-input-position
+  (doseq [[alg input expected-indices]
+          [[:pkcs7 [4 4 4 4] [0 1 2 3]]
+           [:pkcs7 [1 2 3 4] [0 1 2 3]]
+           [:tbc [0 0 0 -1] [3 2 1 0]]
+           [:tbc [0 0 0 1] [3 2 1 0]]
+           [:zerobyte [0 0 0 1] [3 2 1 0]]]]
+    (let [original-scan @#'padding/scan-indices
+          scans (atom [])]
+      (with-redefs-fn {#'padding/scan-indices
+                       (fn [f init indices]
+                         (swap! scans conj (vec indices))
+                         (original-scan f init indices))}
+        (fn []
+          (padding/count (byte-array input) alg)
+          (is (= [expected-indices] @scans)))))))
 
 (deftest unsupported-padding-is-rejected
   (is (nil? (padding/padding-engine :unsupported)))

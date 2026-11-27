@@ -50,6 +50,20 @@
   (let [output (nonce/random-bytes 8 (deterministic-random))]
     (is (= [42 42 42 42 42 42 42 42] (vec output)))))
 
+(deftest default-random-nonce-uses-shared-csprng
+  (let [calls (atom [])]
+    (with-redefs [nonce/random-bytes
+                  (fn
+                    ([length]
+                     (swap! calls conj [:default length])
+                     (byte-array (repeat length 42)))
+                    ([length _]
+                     (swap! calls conj [:custom length])
+                     (byte-array length)))]
+      (let [output (nonce/random-nonce 12)]
+        (is (= [[:default 4]] @calls))
+        (is (= [42 42 42 42] (vec (drop 8 output))))))))
+
 (deftest random-nonce-contains-big-endian-timestamp-and-random-suffix
   (let [before (System/currentTimeMillis)
         output (nonce/random-nonce 12 (deterministic-random))
