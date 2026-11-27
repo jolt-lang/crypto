@@ -2,9 +2,12 @@
   "Drives the shims through the javax.crypto / java.security surface, exactly the
   way ring-core's session-cookie store does."
   (:require [jolt.crypto]
+            [jolt.crypto.bytes-test]
+            [jolt.crypto.codecs-test]
             [jolt.crypto.x509-test :as x509-test]
             [clojure.edn :as edn]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [clojure.test :as t]))
 
 (import '[javax.crypto Cipher Mac])
 (import '[javax.crypto.spec SecretKeySpec IvParameterSpec])
@@ -708,6 +711,10 @@
            (int? (.nextInt (java.security.SecureRandom/getInstance "SHA1PRNG") 100)))
     (check "getInstanceStrong returns a working generator"
            (int? (.nextInt (java.security.SecureRandom/getInstanceStrong) 100))))
+
+  (let [{:keys [fail error]} (t/run-tests 'jolt.crypto.bytes-test
+                                          'jolt.crypto.codecs-test)]
+    (swap! failures + fail error))
 
   (if (zero? @failures)
     (println "\nALL CRYPTO TESTS PASSED")
