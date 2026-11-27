@@ -2,6 +2,8 @@
   "Drives the shims through the javax.crypto / java.security surface, exactly the
   way ring-core's session-cookie store does."
   (:require [jolt.crypto]
+            [jolt.crypto.bytes :as crypto-bytes]
+            [jolt.crypto.crypto :as buddy-crypto]
             [jolt.crypto.bytes-test]
             [jolt.crypto.codecs-test]
             [jolt.crypto.padding-test]
@@ -279,8 +281,36 @@
              (and (not (str/starts-with? c "/usr/lib/"))
                   (not (#{"libcrypto.dylib" "libssl.dylib"} c)))))))
 
+(defn- test-buddy-authenticated-encryption []
+  (let [key (byte-array (range 32))
+        iv (byte-array (range 16))
+        plaintext (byte-array (map int "Buddy-compatible authenticated encryption"))
+        encrypted (buddy-crypto/encrypt plaintext key iv)]
+    (check "Buddy default CBC-HMAC round-trips"
+           (crypto-bytes/equals? plaintext (buddy-crypto/decrypt encrypted key iv))))
+  (let [key (byte-array (range 16))
+        iv (byte-array (range 12))
+        aad (byte-array (range 20))
+        plaintext (byte-array (map int "GCM authenticates AAD"))
+        encrypted (buddy-crypto/encrypt plaintext key iv {:alg :aes128-gcm :aad aad})]
+    (check "Buddy AES-GCM round-trips with AAD"
+           (crypto-bytes/equals? plaintext
+                                 (buddy-crypto/decrypt encrypted key iv
+                                                       {:alg :aes128-gcm :aad aad})))
+    (check "Buddy AES-GCM appends exactly one 128-bit tag"
+           (= (+ (alength plaintext) 16) (alength encrypted)))
+    (aset-byte encrypted 0 (unchecked-byte (bit-xor (aget encrypted 0) 1)))
+    (check "Buddy AES-GCM tampering returns no plaintext"
+           (= {:type :validation :cause :authtag}
+              (try
+                (buddy-crypto/decrypt encrypted key iv {:alg :aes128-gcm :aad aad})
+                nil
+                (catch Exception e
+                  (ex-data e)))))))
+
 (defn -main [& _]
   (test-native-declarations)
+  (test-buddy-authenticated-encryption)
   (test-large-input-digest)
   (test-update-snapshots-input)
   (test-offset-length-overloads)
