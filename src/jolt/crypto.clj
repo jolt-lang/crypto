@@ -9,9 +9,10 @@
     MessageDigest SHA-512 / SHA-384 / SHA-256 / SHA-224 / SHA-1 / MD5
     SecureRandom  RAND_bytes
     SecretKeySpec / IvParameterSpec   key + IV holders
-    KeyPairGenerator   EC over the NIST P-curves, RSA and Ed25519
+    KeyPairGenerator   EC over the NIST P-curves, RSA, Ed25519 and X25519
+    KeyAgreement   X25519
     Signature      ECDSA, RSA PKCS#1 v1.5/PSS, Ed25519 and Ed448
-    KeyFactory   EC/RSA/DSA/Ed25519/Ed448, with X509EncodedKeySpec /
+    KeyFactory   EC/RSA/DSA/Ed25519/Ed448/X25519, with X509EncodedKeySpec /
                   PKCS8EncodedKeySpec / ECGenParameterSpec and PEM decoding
     CertificateFactory   X.509 certificates from PEM or DER, as X509Certificate
                   values (subject/issuer X500Principal, validity, serial,
@@ -1051,8 +1052,9 @@
     ;; the JDK's default RSA size is 2048
     "RSA" (doto (tt :jolt.crypto/keypair-gen)
             (tput! :algo "RSA") (tput! :bits 2048))
+    ;; the JDK's XDH generator defaults to X25519
+    ("X25519" "XDH") (doto (tt :jolt.crypto/keypair-gen) (tput! :algo "XDH"))
     ;; the JDK's EdDSA generator defaults to Ed25519
-    "X25519" (doto (tt :jolt.crypto/keypair-gen) (tput! :algo "XDH"))
     ("ED25519" "EDDSA") (doto (tt :jolt.crypto/keypair-gen) (tput! :algo "EdDSA"))
     (throw (ex-info (str "unsupported KeyPairGenerator algorithm: " algo) {:algo algo}))))
 
@@ -1084,7 +1086,7 @@
   (case (tget self :algo)
     ;; Ed25519 has one size: 255 bits, as the JDK takes it
     ("XDH" "EdDSA") (when-not (and (not (table? spec)) (= 255 (long spec)))
-              (throw (ex-info (str "unsupported 255-bit key parameter: " spec) {:spec spec})))
+                      (throw (ex-info (str "unsupported 255-bit key parameter: " spec) {:spec spec})))
     "RSA" (initialize-rsa-generator! self spec)
     (initialize-ec-generator! self spec))
   nil)
@@ -1128,6 +1130,7 @@
                          "DSA" (doto (tt :jolt.crypto/key-factory) (tput! :algo "DSA"))
                          "X25519" (doto (tt :jolt.crypto/key-factory)
                                     (tput! :algo "XDH") (tput! :key-type "X25519"))
+                         "XDH" (doto (tt :jolt.crypto/key-factory) (tput! :algo "XDH"))
                          "ED25519" (doto (tt :jolt.crypto/key-factory)
                                      (tput! :algo "EdDSA") (tput! :key-type "Ed25519"))
                          "EDDSA" (doto (tt :jolt.crypto/key-factory) (tput! :algo "EdDSA"))
@@ -1168,12 +1171,12 @@
 (defn- install-key-agreement! []
   (doseq [nm ["KeyAgreement" "javax.crypto.KeyAgreement"]]
     (__register-class-statics! nm
-      {"getInstance" (fn [algo]
-                       (when-not (= "X25519" (str/upper-case algo))
-                         (throw (ex-info "Unsupported KeyAgreement algorithm" {:algo algo})))
-                       (tt :jolt.crypto/key-agreement))}))
+      {"getInstance" (fn [algo & _]
+                       (when-not (#{"X25519" "XDH"} (str/upper-case (str algo)))
+                         (throw (ex-info (str "unsupported KeyAgreement algorithm: " algo) {:algo algo})))
+                       (doto (tt :jolt.crypto/key-agreement) (tput! :algo (str algo))))}))
   (__register-class-methods! :jolt.crypto/key-agreement
-    {"getAlgorithm" (fn [_] "X25519")
+    {"getAlgorithm" (fn [self] (tget self :algo))
      "init" (fn [self key]
               (when-not (and (= :jolt.crypto/private-key (tget key :jolt/type))
                              (= "X25519" (key-type key)))

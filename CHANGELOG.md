@@ -9,6 +9,24 @@ matching `:git/sha`.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-27
+
+### Added
+
+- **X25519 through the JCA** (#31). `KeyPairGenerator`, `KeyFactory` and the
+  new `javax.crypto.KeyAgreement` take `X25519` and `XDH`. Keys import from
+  PKCS#8 / X.509 DER and report `XDH` as their algorithm, as on the JVM. An
+  agreement takes one final public-key phase and yields the 32-byte secret,
+  can be reused with the same private key, and rejects low-order peer points.
+- **One-shot `AES/GCM/NoPadding` through `javax.crypto.Cipher`** (#32), with
+  `GCMParameterSpec`. It takes a 128-bit tag and optional AAD through
+  `updateAAD`, appends the tag on encryption, and returns plaintext only after
+  the tag verifies. Encrypting again with the same key and IV throws, as on
+  the JVM. The shim lives in `jolt.crypto.internal.gcm`.
+- **`MessageDigest/isEqual`** (#29), comparing the whole first digest whatever
+  the bytes, with the JDK's results for different lengths, empty arrays and
+  nulls.
+
 ## [0.4.2] - 2026-11-27
 
 ### Added
@@ -242,7 +260,8 @@ The same code as 0.1.0, tagged on the merge of #16.
 - First release: AES/CBC, HMAC, SHA digests, MD5 and `SecureRandom` over
   OpenSSL, through the `javax.crypto` / `java.security` classes.
 
-[Unreleased]: https://github.com/jolt-lang/crypto/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/jolt-lang/crypto/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/jolt-lang/crypto/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/jolt-lang/crypto/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/jolt-lang/crypto/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/jolt-lang/crypto/compare/v0.3.0...v0.4.0
