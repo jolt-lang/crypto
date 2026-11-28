@@ -4,6 +4,7 @@
   surface that real Clojure libraries touch:
 
     Cipher        AES/CBC/PKCS5Padding (128/192/256, key length picks the variant)
+                  and one-shot AES/GCM/NoPadding with GCMParameterSpec
     Mac           HmacSHA512 / HmacSHA384 / HmacSHA256 / HmacSHA1
     MessageDigest SHA-512 / SHA-384 / SHA-256 / SHA-224 / SHA-1 / MD5
     SecureRandom  RAND_bytes
@@ -33,6 +34,7 @@
                                                   consume-update-args der-out
                                                   pkey-type ptr-size table? tget
                                                   tput! tt with-mem-bio with-ptrs]]
+            [jolt.crypto.internal.gcm :as gcm]
             [jolt.crypto.internal.x509 :as x509]
             [clojure.string :as str]))
 
@@ -867,7 +869,10 @@
   mode)."
   []
   (doseq [nm ["Cipher" "javax.crypto.Cipher"]]
-    (__register-class-statics! nm {"getInstance" (fn [algo & _] (doto (tt :jolt.crypto/cipher) (tput! :algo (str algo))))
+    (__register-class-statics! nm {"getInstance" (fn [algo & _]
+                                                  (if (= "AES/GCM/NOPADDING" (str/upper-case algo))
+                                                    (gcm/cipher)
+                                                    (doto (tt :jolt.crypto/cipher) (tput! :algo (str algo)))))
                                    "ENCRYPT_MODE" ENCRYPT-MODE
                                    "DECRYPT_MODE" DECRYPT-MODE}))
   (__register-class-methods! :jolt.crypto/cipher
@@ -1228,6 +1233,7 @@
   []
   (install-secret-key-specs!)
   (install-cipher!)
+  (gcm/install!)
   (install-mac!)
   (install-message-digest!)
   (install-secure-random!)

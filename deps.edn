@@ -20,6 +20,7 @@
                               "javax.crypto.Cipher"
                               "javax.crypto.spec.SecretKeySpec"
                               "javax.crypto.spec.IvParameterSpec"
+                              "javax.crypto.spec.GCMParameterSpec"
                               "java.security.Signature"
                               "java.security.KeyPairGenerator"
                               "java.security.KeyFactory"
