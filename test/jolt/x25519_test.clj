@@ -33,3 +33,19 @@
       (is (= "XDH" (.getAlgorithm (.getPublic a))))
       (is (= (agree (.getPrivate a) (.getPublic b))
              (agree (.getPrivate b) (.getPublic a)))))))
+
+(deftest xdh-aliases
+  (let [kpg (KeyPairGenerator/getInstance "XDH")
+        a (.generateKeyPair kpg) b (.generateKeyPair kpg)
+        factory (KeyFactory/getInstance "XDH")
+        ka (KeyAgreement/getInstance "XDH")]
+    (is (= "XDH" (.getAlgorithm ka)))
+    (is (= "X25519" (.getAlgorithm (KeyAgreement/getInstance "X25519"))))
+    (is (thrown? Exception (KeyAgreement/getInstance "ECDH")))
+    (.init ka (.generatePrivate factory (PKCS8EncodedKeySpec. (.getEncoded (.getPrivate a)))))
+    (.doPhase ka (.generatePublic factory (X509EncodedKeySpec. (.getEncoded (.getPublic b)))) true)
+    (let [secret (vec (.generateSecret ka))]
+      (.init ka (.getPrivate b))
+      (.doPhase ka (.getPublic a) true)
+      (is (= 32 (count secret)))
+      (is (= secret (vec (.generateSecret ka)))))))
